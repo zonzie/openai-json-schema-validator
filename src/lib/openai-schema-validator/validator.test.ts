@@ -269,6 +269,196 @@ describe("validateOpenAISchema", () => {
     expect(result.fixedSchema).toBeNull();
   });
 
+  it.each([42, []])(
+    "rejects a non-schema items value: %j",
+    (items) => {
+      const result = validateOpenAISchema({
+        type: "object",
+        properties: {
+          values: {
+            type: "array",
+            items,
+          },
+        },
+        required: ["values"],
+        additionalProperties: false,
+      });
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContainEqual(
+        expect.objectContaining({
+          code: "items_must_be_schema",
+          path: "$.properties.values.items",
+        }),
+      );
+    },
+  );
+
+  it.each([{}, []])(
+    "rejects an anyOf value that is not a non-empty schema array",
+    (anyOf) => {
+      const result = validateOpenAISchema({
+        type: "object",
+        properties: {
+          value: { anyOf },
+        },
+        required: ["value"],
+        additionalProperties: false,
+      });
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContainEqual(
+        expect.objectContaining({
+          code: "any_of_must_be_non_empty_array",
+          path: "$.properties.value.anyOf",
+        }),
+      );
+    },
+  );
+
+  it.each([
+    ["patternProperties", [], "$.patternProperties"],
+    ["$defs", [], "$.$defs"],
+    ["definitions", null, "$.definitions"],
+  ] as const)(
+    "rejects a malformed %s schema map",
+    (keyword, value, expectedPath) => {
+      const result = validateOpenAISchema({
+        type: "object",
+        properties: {},
+        required: [],
+        additionalProperties: false,
+        [keyword]: value,
+      });
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContainEqual(
+        expect.objectContaining({
+          code: "schema_map_must_be_object",
+          path: expectedPath,
+        }),
+      );
+    },
+  );
+
+  it("rejects an enum value that is not an array", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        color: {
+          type: "string",
+          enum: "red",
+        },
+      },
+      required: ["color"],
+      additionalProperties: false,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "enum_must_be_array",
+        path: "$.properties.color.enum",
+      }),
+    );
+  });
+
+  it.each([
+    [
+      { $ref: 7 },
+      "ref_must_be_string",
+    ],
+    [
+      { $ref: "#/$defs/missing" },
+      "unresolved_local_ref",
+    ],
+  ] as const)("rejects an invalid local reference", (propertySchema, code) => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        value: propertySchema,
+      },
+      required: ["value"],
+      additionalProperties: false,
+      $defs: {},
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code,
+        path: "$.properties.value.$ref",
+      }),
+    );
+  });
+
+  it("validates local reference targets outside schema containers", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        value: { $ref: "#/x" },
+      },
+      required: ["value"],
+      additionalProperties: false,
+      x: {
+        items: 42,
+      },
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "items_must_be_schema",
+        path: "$.x.items",
+      }),
+    );
+  });
+
+  it("safely repairs referenced object schemas without mutating input", () => {
+    const input = {
+      type: "object",
+      properties: {
+        value: { $ref: "#/x" },
+      },
+      required: ["value"],
+      additionalProperties: false,
+      x: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+        },
+        required: [],
+      },
+    };
+
+    const result = validateOpenAISchema(input);
+
+    expect(result.fixedSchema).toEqual({
+      type: "object",
+      properties: {
+        value: { $ref: "#/x" },
+      },
+      required: ["value"],
+      additionalProperties: false,
+      x: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+        },
+        required: ["name"],
+        additionalProperties: false,
+      },
+    });
+    expect(input.x).toEqual({
+      type: "object",
+      properties: {
+        name: { type: "string" },
+      },
+      required: [],
+    });
+    expect(validateOpenAISchema(result.fixedSchema).valid).toBe(true);
+  });
+
   it("escapes user-defined names in diagnostic JSON paths", () => {
     const result = validateOpenAISchema({
       type: "object",
@@ -384,6 +574,48 @@ describe("validateOpenAISchema", () => {
         path: "$",
       }),
     );
+  });
+
+  it("bounds diagnostics and paths for deeply invalid schemas", () => {
+    let schema: Record<string, unknown> = {
+      type: "object",
+      properties: {},
+      required: [],
+    };
+
+    for (let level = 0; level < 300; level += 1) {
+      schema = {
+        type: "object",
+        properties: { child: schema },
+        required: [],
+      };
+    }
+
+    const result = validateOpenAISchema(schema);
+
+    expect(result.errors).toHaveLength(100);
+    expect(result.omittedDiagnosticCount).toBeGreaterThan(0);
+    expect(
+      Math.max(...result.errors.map((diagnostic) => diagnostic.path.length)),
+    ).toBeLessThanOrEqual(512);
+  });
+
+  it("bounds warnings without making an otherwise valid schema invalid", () => {
+    const unknownKeywords = Object.fromEntries(
+      Array.from({ length: 60 }, (_, index) => [`unknown_${index}`, true]),
+    );
+
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+      ...unknownKeywords,
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toHaveLength(50);
+    expect(result.omittedDiagnosticCount).toBe(10);
   });
 
   it("enforces the 120,000-character schema string limit", () => {
@@ -667,6 +899,199 @@ describe("validateOpenAISchema", () => {
       expect.objectContaining({
         code: "object_nesting_too_deep",
         path: "$",
+      }),
+    );
+  });
+
+  it("validates a shared-reference DAG within the core operation budget", () => {
+    const definitions: Record<string, unknown> = {
+      level20: {
+        type: "object",
+        properties: {},
+        required: [],
+        additionalProperties: false,
+      },
+    };
+
+    for (let level = 19; level >= 0; level -= 1) {
+      definitions[`level${level}`] = {
+        anyOf: [
+          { $ref: `#/$defs/level${level + 1}` },
+          { $ref: `#/$defs/level${level + 1}` },
+        ],
+      };
+    }
+
+    const startedAt = performance.now();
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        value: { $ref: "#/$defs/level0" },
+      },
+      required: ["value"],
+      additionalProperties: false,
+      $defs: definitions,
+    });
+    const elapsedMilliseconds = performance.now() - startedAt;
+
+    expect(result.valid).toBe(true);
+    expect(result.stats.maxObjectDepth).toBe(2);
+    expect(elapsedMilliseconds).toBeLessThan(500);
+  });
+
+  it("stops cyclic reference expansion at the core operation budget", () => {
+    const definitions: Record<string, unknown> = {
+      level18: { $ref: "#/$defs/level18" },
+    };
+
+    for (let level = 17; level >= 0; level -= 1) {
+      definitions[`level${level}`] = {
+        anyOf: [
+          { $ref: `#/$defs/level${level + 1}` },
+          { $ref: `#/$defs/level${level + 1}` },
+        ],
+      };
+    }
+
+    const startedAt = performance.now();
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        value: { $ref: "#/$defs/level0" },
+      },
+      required: ["value"],
+      additionalProperties: false,
+      $defs: definitions,
+    });
+    const elapsedMilliseconds = performance.now() - startedAt;
+
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "reference_analysis_budget_exceeded",
+      }),
+    );
+    expect(elapsedMilliseconds).toBeLessThan(500);
+  });
+
+  it("reports reference budget exhaustion when the error cap is full", () => {
+    const definitions: Record<string, unknown> = Object.fromEntries(
+      Array.from({ length: 101 }, (_, index) => [
+        `invalid${index}`,
+        {
+          type: "object",
+          properties: {},
+          required: [],
+        },
+      ]),
+    );
+    definitions.level18 = { $ref: "#/$defs/level18" };
+
+    for (let level = 17; level >= 0; level -= 1) {
+      definitions[`level${level}`] = {
+        anyOf: [
+          { $ref: `#/$defs/level${level + 1}` },
+          { $ref: `#/$defs/level${level + 1}` },
+        ],
+      };
+    }
+
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        value: { $ref: "#/$defs/level0" },
+      },
+      required: ["value"],
+      additionalProperties: false,
+      $defs: definitions,
+    });
+
+    expect(result.errors).toHaveLength(100);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "reference_analysis_budget_exceeded",
+      }),
+    );
+    expect(result.omittedDiagnosticCount).toBeGreaterThan(0);
+  });
+
+  it("preserves finite structural depth across cyclic definitions", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+      $defs: {
+        A: {
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+          anyOf: [{ $ref: "#/$defs/B" }],
+        },
+        B: {
+          type: "object",
+          properties: {
+            next: { $ref: "#/$defs/A" },
+          },
+          required: ["next"],
+          additionalProperties: false,
+          anyOf: [{ $ref: "#/$defs/B" }],
+        },
+      },
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.stats.maxObjectDepth).toBe(2);
+  });
+
+  it("does not reuse cycle-dependent depth results across reference entries", () => {
+    const definitions: Record<string, unknown> = {};
+
+    for (let level = 8; level >= 1; level -= 1) {
+      definitions[`C${level}`] = {
+        type: "object",
+        properties:
+          level === 8
+            ? {}
+            : { next: { $ref: `#/$defs/C${level + 1}` } },
+        required: level === 8 ? [] : ["next"],
+        additionalProperties: false,
+      };
+    }
+
+    definitions.A = {
+      type: "object",
+      properties: {
+        b: { $ref: "#/$defs/B" },
+        c: { $ref: "#/$defs/C1" },
+      },
+      required: ["b", "c"],
+      additionalProperties: false,
+    };
+    definitions.B = {
+      type: "object",
+      properties: {
+        a: { $ref: "#/$defs/A" },
+      },
+      required: ["a"],
+      additionalProperties: false,
+    };
+
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        p: { $ref: "#/$defs/A" },
+        q: { $ref: "#/$defs/B" },
+      },
+      required: ["p", "q"],
+      additionalProperties: false,
+      $defs: definitions,
+    });
+
+    expect(result.stats.maxObjectDepth).toBe(11);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "object_nesting_too_deep",
       }),
     );
   });

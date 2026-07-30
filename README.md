@@ -16,6 +16,7 @@ that can be changed safely.
 - every declared property appears in `required`
 - every required name exists in `properties`
 - unsupported composition keywords
+- malformed `items`, `anyOf`, schema maps, enums, and local references
 - documented type and string-format values
 - 5,000-property and 10-object-level limits
 - 120,000-character schema string budget
@@ -73,6 +74,13 @@ curl -X POST http://localhost:3000/api/validate \
 The endpoint returns the same versioned `ValidationResult` used by the browser
 workbench. The server does not persist input. The web interface itself imports
 the pure validator and runs locally in the browser.
+
+The HTTP boundary accepts request bodies up to 1,000,000 bytes and keeps
+responses at or below 512,000 bytes. Core results retain at most 100 errors and
+50 warnings, cap diagnostic paths and text, and report how many additional
+findings were omitted. Reference-depth analysis also has a 50,000-operation
+budget. When only a large fixed schema would exceed the response budget, the
+API omits that field and returns `fixedSchemaOmitted: true`.
 
 ## Verification
 

@@ -49,6 +49,12 @@ Errors:
 - The root schema must be an object with `type: "object"`.
 - Root-level `anyOf` is not allowed.
 - When present, `properties` must be an object whose values are schemas.
+- `patternProperties`, `$defs`, and `definitions` must be objects whose values
+  are schemas.
+- `items` must be a single schema object.
+- `anyOf` must be a non-empty array whose entries are schema objects.
+- `enum` must be an array.
+- `$ref` must be a string, and local references must resolve to schema objects.
 - Every object must set `additionalProperties: false`.
 - Every key in an object's `properties` must appear in its `required` array.
 - Every name in `required` must exist in `properties`.
@@ -82,6 +88,20 @@ Safe auto-fixes:
 Auto-fix does not rewrite root types, composition, limits, references, enums,
 or unknown keywords.
 
+Diagnostic budgets:
+
+- Return at most 100 errors and 50 warnings.
+- Limit diagnostic paths to 512 characters and messages or suggestions to
+  1,024 characters.
+- Report the number of additional diagnostics omitted after those limits.
+- Retain global-limit and reference-budget errors when the diagnostic list is
+  full by omitting a lower-priority structural finding.
+- Continue computing aggregate schema statistics after the diagnostic limit is
+  reached.
+- Stop reference-depth analysis after 50,000 graph operations and return a
+  `reference_analysis_budget_exceeded` error instead of continuing an
+  adversarial cyclic expansion.
+
 ## API contract
 
 `POST /api/validate`
@@ -106,6 +126,15 @@ Malformed request JSON or a missing `schema` field: HTTP 400 with:
   }
 }
 ```
+
+Request bodies may be at most 1,000,000 bytes. Larger bodies return HTTP 413
+with the `payload_too_large` code.
+
+Validation responses may be at most 512,000 bytes. If a conservative
+`fixedSchema` would exceed that budget, the API returns the diagnostics with
+`fixedSchema: null` and `fixedSchemaOmitted: true`. If the bounded result still
+cannot fit, the API returns HTTP 422 with the
+`validation_result_too_large` code.
 
 The API performs no network calls and persists no input.
 
@@ -139,6 +168,11 @@ The page should feel like a precise engineering instrument:
   safely fixed.
 - Nested object paths are precise.
 - Limits and unsupported composition rules are enforced.
+- Malformed supported-keyword values and broken local references are rejected.
+- Resolved local reference targets receive the same structural validation as
+  directly nested schemas.
+- Shared `$ref` graphs do not cause repeated exponential traversal.
+- Diagnostic, request, and response size budgets are enforced.
 - All supported wrappers resolve to the same schema result.
 - The API mirrors the core result and rejects bad requests.
 - The primary browser workflow passes at desktop and narrow mobile widths.

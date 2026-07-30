@@ -173,7 +173,7 @@ export function ValidatorWorkbench() {
         : "Documented rules pass"
       : `${result.errors.length} ${
           result.errors.length === 1 ? "error" : "errors"
-        }`;
+        }${result.omittedDiagnosticCount > 0 ? " · more omitted" : ""}`;
 
   return (
     <section className={styles.workbench} aria-labelledby="workbench-title">
@@ -304,9 +304,11 @@ export function ValidatorWorkbench() {
               <h3>
                 {diagnostics.length === 0
                   ? "No documented rule violations"
-                  : `${diagnostics.length} ${
-                      diagnostics.length === 1 ? "finding" : "findings"
-                    }`}
+                  : result.omittedDiagnosticCount > 0
+                    ? `${diagnostics.length} shown · ${result.omittedDiagnosticCount} omitted`
+                    : `${diagnostics.length} ${
+                        diagnostics.length === 1 ? "finding" : "findings"
+                      }`}
               </h3>
             </div>
             <code>{result.sourcePath}</code>

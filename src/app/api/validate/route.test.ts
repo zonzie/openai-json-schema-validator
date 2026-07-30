@@ -58,6 +58,53 @@ describe("POST /api/validate", () => {
     );
   });
 
+  it("rejects request bodies larger than one million bytes", async () => {
+    const request = new Request("http://localhost/api/validate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ schema: "x".repeat(1_000_001) }),
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "payload_too_large",
+        message: "Request body must not exceed 1,000,000 bytes.",
+      },
+    });
+  });
+
+  it("keeps validation responses within the response byte budget", async () => {
+    const request = new Request("http://localhost/api/validate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        schema: {
+          type: "object",
+          description: "x".repeat(600_000),
+          properties: {},
+          required: [],
+        },
+      }),
+    });
+
+    const response = await POST(request);
+    const responseText = await response.text();
+    const body = JSON.parse(responseText) as {
+      fixedSchema: unknown;
+      fixedSchemaOmitted: boolean;
+    };
+
+    expect(response.status).toBe(200);
+    expect(new TextEncoder().encode(responseText).byteLength).toBeLessThanOrEqual(
+      512_000,
+    );
+    expect(body.fixedSchema).toBeNull();
+    expect(body.fixedSchemaOmitted).toBe(true);
+  });
+
   it("rejects requests without a schema", async () => {
     const request = new Request("http://localhost/api/validate", {
       method: "POST",
