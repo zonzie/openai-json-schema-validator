@@ -226,7 +226,7 @@
   width: 5px;
   height: 5px;
   content: "";
-  background: var(--green);
+  background: var(--signal);
 }
 
 .heroSpecimen {

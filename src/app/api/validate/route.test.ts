@@ -61,7 +61,25 @@ describe("POST /api/validate", () => {
     await expect(response.json()).resolves.toEqual({
       error: {
         code: "invalid_request",
-        message: "The request body must be valid JSON.",
+        message: "A schema string or object is required.",
+      },
+    });
+  });
+
+  it("rejects a null JSON request body", async () => {
+    const request = new Request("http://localhost/api/validate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "null",
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: "invalid_request",
+        message: "A schema string or object is required.",
       },
     });
   });

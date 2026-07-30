@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 
 import {
+  RULE_VERSION,
   type SchemaDiagnostic,
   type ValidationResult,
   validateOpenAISchema,
@@ -169,7 +170,7 @@ export function ValidatorWorkbench() {
     : result.valid
       ? result.warnings.length > 0
         ? "Valid with warnings"
-        : "OpenAI-ready"
+        : "Documented rules pass"
       : `${result.errors.length} ${
           result.errors.length === 1 ? "error" : "errors"
         }`;
@@ -178,7 +179,9 @@ export function ValidatorWorkbench() {
     <section className={styles.workbench} aria-labelledby="workbench-title">
       <div className={styles.workbenchHeader}>
         <div>
-          <p className={styles.eyebrow}>Local preflight / rule set 2026-07-30</p>
+          <p className={styles.eyebrow}>
+            Local preflight / rule set {RULE_VERSION}
+          </p>
           <h2 id="workbench-title">Schema workbench</h2>
         </div>
         <div className={styles.headerSignals}>

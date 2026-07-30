@@ -78,8 +78,8 @@
   height: 7px;
   display: block;
   border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 0 4px rgba(45, 117, 74, 0.12);
+  background: var(--signal);
+  box-shadow: 0 0 0 4px rgba(255, 91, 36, 0.12);
 }
 
 .statusValid {

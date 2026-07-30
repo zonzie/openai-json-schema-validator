@@ -147,10 +147,11 @@ export default function Home() {
                 Schema Validator
               </h1>
               <p className={styles.heroLead}>
-                Catch Structured Outputs schema errors before the API does.
-                Paste a bare schema or request wrapper, get exact paths, and
-                repair the strict-mode mistakes that generic JSON Schema tools
-                miss.
+                Use this OpenAI Structured Output validator to investigate an
+                OpenAI Structured Output validation error—including “invalid
+                schema for response_format”—before sending a request. Paste a
+                bare schema or wrapper, get exact paths, and safely repair
+                common strict-mode mistakes.
               </p>
               <div className={styles.heroActions}>
                 <a className={styles.primaryLink} href="#validator">
@@ -222,7 +223,9 @@ export default function Home() {
         <section id="rules" className={styles.rulesSection}>
           <div className={styles.sectionIntro}>
             <p className={styles.sectionLabel}>Rule index / 06 checks</p>
-            <h2>Not just valid JSON. Valid for OpenAI.</h2>
+            <h2>
+              Not just valid JSON. Checked against OpenAI’s documented subset.
+            </h2>
             <p>
               Ordinary validators answer whether a document follows JSON
               Schema. This one focuses on the smaller contract accepted by

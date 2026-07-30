@@ -53,6 +53,10 @@ Errors:
 - Every name in `required` must exist in `properties`.
 - Unsupported composition keywords are rejected: `allOf`, `not`,
   `dependentRequired`, `dependentSchemas`, `if`, `then`, `else`.
+- Declared types must use the documented set: `string`, `number`, `boolean`,
+  `integer`, `object`, `array`, or `null`.
+- String formats must use the documented set: `date-time`, `time`, `date`,
+  `duration`, `email`, `hostname`, `ipv4`, `ipv6`, or `uuid`.
 - The schema may contain at most 5,000 object properties.
 - Object nesting may not exceed 10 levels.
 - The combined length of property names, definition names, enum string values,

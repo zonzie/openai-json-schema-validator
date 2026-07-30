@@ -43,6 +43,15 @@ describe("validateOpenAISchema", () => {
     expect(result.fixedSchema).toBeNull();
   });
 
+  it("returns fresh stats for each malformed input result", () => {
+    const first = validateOpenAISchema("{");
+    first.stats.propertyCount = 99;
+
+    const second = validateOpenAISchema("{");
+
+    expect(second.stats.propertyCount).toBe(0);
+  });
+
   it("rejects a root schema that is not an object", () => {
     const result = validateOpenAISchema({
       type: "array",
@@ -133,6 +142,49 @@ describe("validateOpenAISchema", () => {
     });
 
     expect(validateOpenAISchema(result.fixedSchema).valid).toBe(true);
+  });
+
+  it("removes required names that have no declared property", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      required: ["ghost"],
+      additionalProperties: false,
+    });
+
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "required_property_not_declared",
+        path: "$.required",
+      }),
+    );
+    expect(result.fixedSchema).toEqual({
+      type: "object",
+      required: [],
+      additionalProperties: false,
+    });
+    expect(validateOpenAISchema(result.fixedSchema).valid).toBe(true);
+  });
+
+  it("escapes user-defined names in diagnostic JSON paths", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        "profile.name": {
+          type: "object",
+          properties: {},
+          required: [],
+        },
+      },
+      required: ["profile.name"],
+      additionalProperties: false,
+    });
+
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "additional_properties_must_be_false",
+        path: '$.properties["profile.name"].additionalProperties',
+      }),
+    );
   });
 
   it("rejects unsupported composition keywords without rewriting them", () => {
@@ -331,6 +383,26 @@ describe("validateOpenAISchema", () => {
     }
   });
 
+  it("preserves a wrapper source path when its schema value is malformed", () => {
+    const result = validateOpenAISchema({
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          schema: "not-an-object",
+        },
+      },
+    });
+
+    expect(result.sourcePath).toBe("$.text.format.schema");
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "root_must_be_object",
+        path: "$.text.format.schema.type",
+      }),
+    );
+  });
+
   it("warns about fine-tuned and unknown keywords without declaring the schema invalid", () => {
     const result = validateOpenAISchema({
       type: "object",
@@ -398,6 +470,85 @@ describe("validateOpenAISchema", () => {
       expect.objectContaining({
         code: "unsupported_type",
         path: "$.properties.publishedAt.type",
+      }),
+    );
+  });
+
+  it("counts object depth through local definition references", () => {
+    const definitions: Record<string, unknown> = {};
+
+    for (let level = 10; level >= 1; level -= 1) {
+      definitions[`level${level}`] = {
+        type: "object",
+        properties:
+          level === 10
+            ? {}
+            : {
+                next: {
+                  $ref: `#/$defs/level${level + 1}`,
+                },
+              },
+        required: level === 10 ? [] : ["next"],
+        additionalProperties: false,
+      };
+    }
+
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        root: { $ref: "#/$defs/level1" },
+      },
+      required: ["root"],
+      additionalProperties: false,
+      $defs: definitions,
+    });
+
+    expect(result.stats.maxObjectDepth).toBe(11);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "object_nesting_too_deep",
+        path: "$",
+      }),
+    );
+  });
+
+  it("supports recursive references without treating them as infinite depth", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        label: { type: "string" },
+        children: {
+          type: "array",
+          items: { $ref: "#" },
+        },
+      },
+      required: ["label", "children"],
+      additionalProperties: false,
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.stats.maxObjectDepth).toBe(1);
+  });
+
+  it("anchors global limit diagnostics to an extracted wrapper path", () => {
+    const longPropertyName = "x".repeat(120_001);
+    const result = validateOpenAISchema({
+      name: "wrapped",
+      strict: true,
+      schema: {
+        type: "object",
+        properties: {
+          [longPropertyName]: { type: "string" },
+        },
+        required: [longPropertyName],
+        additionalProperties: false,
+      },
+    });
+
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "schema_text_too_long",
+        path: "$.schema",
       }),
     );
   });

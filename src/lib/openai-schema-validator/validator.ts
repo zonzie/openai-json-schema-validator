@@ -118,7 +118,15 @@ function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function makeDiagnostic(
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((item): item is string => typeof item === "string")
+  );
+}
+
+function createDiagnostic(
+  severity: DiagnosticSeverity,
   code: string,
   path: string,
   message: string,
@@ -126,7 +134,7 @@ function makeDiagnostic(
 ): SchemaDiagnostic {
   return {
     code,
-    severity: "error",
+    severity,
     path,
     message,
     suggestion,
@@ -134,20 +142,14 @@ function makeDiagnostic(
   };
 }
 
-function makeWarning(
-  code: string,
-  path: string,
-  message: string,
-  suggestion?: string,
-): SchemaDiagnostic {
-  return {
-    code,
-    severity: "warning",
-    path,
-    message,
-    suggestion,
-    documentationUrl: OPENAI_SCHEMA_DOCS_URL,
-  };
+function appendPath(path: string, segment: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(segment)
+    ? `${path}.${segment}`
+    : `${path}[${JSON.stringify(segment)}]`;
+}
+
+function appendIndex(path: string, index: number): string {
+  return `${path}[${index}]`;
 }
 
 function cloneJson(value: unknown): unknown {
@@ -177,7 +179,7 @@ function extractSchema(input: unknown): ExtractedSchema {
   const responseFormat = input.response_format;
   if (isObject(responseFormat)) {
     const jsonSchema = responseFormat.json_schema;
-    if (isObject(jsonSchema) && isObject(jsonSchema.schema)) {
+    if (isObject(jsonSchema) && "schema" in jsonSchema) {
       return {
         schema: jsonSchema.schema,
         sourcePath: "$.response_format.json_schema.schema",
@@ -188,7 +190,7 @@ function extractSchema(input: unknown): ExtractedSchema {
   const text = input.text;
   if (isObject(text)) {
     const format = text.format;
-    if (isObject(format) && isObject(format.schema)) {
+    if (isObject(format) && "schema" in format) {
       return {
         schema: format.schema,
         sourcePath: "$.text.format.schema",
@@ -202,7 +204,7 @@ function extractSchema(input: unknown): ExtractedSchema {
         continue;
       }
 
-      if (isObject(tool.function.parameters)) {
+      if ("parameters" in tool.function) {
         return {
           schema: tool.function.parameters,
           sourcePath: `$.tools[${index}].function.parameters`,
@@ -211,11 +213,11 @@ function extractSchema(input: unknown): ExtractedSchema {
     }
   }
 
-  if (input.type !== "object" && isObject(input.schema)) {
+  if (input.type !== "object" && "schema" in input) {
     return { schema: input.schema, sourcePath: "$.schema" };
   }
 
-  if (input.type !== "object" && isObject(input.parameters)) {
+  if (input.type !== "object" && "parameters" in input) {
     return { schema: input.parameters, sourcePath: "$.parameters" };
   }
 
@@ -242,9 +244,10 @@ function visitSchema(
   for (const keyword of UNSUPPORTED_COMPOSITION_KEYWORDS) {
     if (keyword in node) {
       state.errors.push(
-        makeDiagnostic(
+        createDiagnostic(
+          "error",
           "unsupported_keyword",
-          `${path}.${keyword}`,
+          appendPath(path, keyword),
           `"${keyword}" is not supported by OpenAI Structured Outputs.`,
           `Remove "${keyword}" or express the constraint with the supported JSON Schema subset.`,
         ),
@@ -255,18 +258,20 @@ function visitSchema(
   for (const keyword of Object.keys(node)) {
     if (FINE_TUNED_LIMITED_KEYWORDS.has(keyword)) {
       state.warnings.push(
-        makeWarning(
+        createDiagnostic(
+          "warning",
           "fine_tuned_model_keyword",
-          `${path}.${keyword}`,
+          appendPath(path, keyword),
           `"${keyword}" is not supported for fine-tuned models.`,
           "Remove this constraint when targeting a fine-tuned model.",
         ),
       );
     } else if (!KNOWN_SCHEMA_KEYWORDS.has(keyword)) {
       state.warnings.push(
-        makeWarning(
+        createDiagnostic(
+          "warning",
           "unknown_keyword",
-          `${path}.${keyword}`,
+          appendPath(path, keyword),
           `"${keyword}" is not listed in OpenAI's documented Structured Outputs subset.`,
           "Verify this keyword against the current OpenAI documentation.",
         ),
@@ -280,9 +285,10 @@ function visitSchema(
       !SUPPORTED_STRING_FORMATS.has(node.format))
   ) {
     state.errors.push(
-      makeDiagnostic(
+      createDiagnostic(
+        "error",
         "unsupported_format",
-        `${path}.format`,
+        appendPath(path, "format"),
         `"${String(node.format)}" is not a documented Structured Outputs string format.`,
         `Use one of: ${Array.from(SUPPORTED_STRING_FORMATS).join(", ")}.`,
       ),
@@ -300,9 +306,10 @@ function visitSchema(
 
     if (hasUnsupportedType) {
       state.errors.push(
-        makeDiagnostic(
+        createDiagnostic(
+          "error",
           "unsupported_type",
-          `${path}.type`,
+          appendPath(path, "type"),
           `"${Array.isArray(node.type) ? node.type.join(", ") : String(node.type)}" contains a type outside the documented Structured Outputs set.`,
           `Use one or more of: ${Array.from(SUPPORTED_TYPES).join(", ")}.`,
         ),
@@ -322,9 +329,10 @@ function visitSchema(
 
     if (node.additionalProperties !== false) {
       state.errors.push(
-        makeDiagnostic(
+        createDiagnostic(
+          "error",
           "additional_properties_must_be_false",
-          `${path}.additionalProperties`,
+          appendPath(path, "additionalProperties"),
           'Every object schema must set "additionalProperties" to false.',
           'Set "additionalProperties": false on this object.',
         ),
@@ -333,59 +341,73 @@ function visitSchema(
       state.changed = true;
     }
 
+    const propertyNames = properties ? Object.keys(properties) : [];
+
     if (properties) {
-      const propertyNames = Object.keys(properties);
       state.stats.propertyCount += propertyNames.length;
       state.stats.totalStringLength += propertyNames.reduce(
         (total, propertyName) => total + propertyName.length,
         0,
       );
+    }
 
-      const declaredRequired = Array.isArray(node.required)
-        ? node.required.filter(
-            (propertyName): propertyName is string =>
-              typeof propertyName === "string",
-          )
-        : [];
-      const fixedRequired = declaredRequired.filter((propertyName) =>
-        propertyNames.includes(propertyName),
+    const requiredValue = node.required;
+    const requiredIsStringArray = isStringArray(requiredValue);
+    const declaredRequired: string[] = requiredIsStringArray
+      ? requiredValue
+      : [];
+    const fixedRequired = declaredRequired.filter((propertyName) =>
+      propertyNames.includes(propertyName),
+    );
+    let requiredChanged = false;
+
+    if ("required" in node && !requiredIsStringArray) {
+      state.errors.push(
+        createDiagnostic(
+          "error",
+          "required_must_be_string_array",
+          appendPath(path, "required"),
+          '"required" must be an array of property-name strings.',
+          'Replace "required" with an array containing declared property names.',
+        ),
       );
+      requiredChanged = true;
+    }
 
-      for (const propertyName of declaredRequired) {
-        if (!propertyNames.includes(propertyName)) {
-          state.errors.push(
-            makeDiagnostic(
-              "required_property_not_declared",
-              `${path}.required`,
-              `"${propertyName}" is listed in "required" but is not declared in "properties".`,
-              `Remove "${propertyName}" from "required" or declare the property.`,
-            ),
-          );
-          state.changed = true;
-        }
+    for (const propertyName of declaredRequired) {
+      if (!propertyNames.includes(propertyName)) {
+        state.errors.push(
+          createDiagnostic(
+            "error",
+            "required_property_not_declared",
+            appendPath(path, "required"),
+            `"${propertyName}" is listed in "required" but is not declared in "properties".`,
+            `Remove "${propertyName}" from "required" or declare the property.`,
+          ),
+        );
+        requiredChanged = true;
       }
+    }
 
-      for (const propertyName of propertyNames) {
-        if (!fixedRequired.includes(propertyName)) {
-          state.errors.push(
-            makeDiagnostic(
-              "property_must_be_required",
-              `${path}.required`,
-              `"${propertyName}" is declared in "properties" but missing from "required".`,
-              `Add "${propertyName}" to "required".`,
-            ),
-          );
-          fixedRequired.push(propertyName);
-          state.changed = true;
-        }
+    for (const propertyName of propertyNames) {
+      if (!fixedRequired.includes(propertyName)) {
+        state.errors.push(
+          createDiagnostic(
+            "error",
+            "property_must_be_required",
+            appendPath(path, "required"),
+            `"${propertyName}" is declared in "properties" but missing from "required".`,
+            `Add "${propertyName}" to "required".`,
+          ),
+        );
+        fixedRequired.push(propertyName);
+        requiredChanged = true;
       }
+    }
 
-      if (
-        state.changed &&
-        (fixedRequired.length > 0 || Array.isArray(node.required))
-      ) {
-        node.required = fixedRequired;
-      }
+    if (requiredChanged) {
+      node.required = fixedRequired;
+      state.changed = true;
     }
   }
 
@@ -400,9 +422,10 @@ function visitSchema(
 
     if (node.enum.length > 250 && enumStringLength > 15_000) {
       state.errors.push(
-        makeDiagnostic(
+        createDiagnostic(
+          "error",
           "enum_string_values_too_long",
-          `${path}.enum`,
+          appendPath(path, "enum"),
           `This enum has more than 250 values and ${enumStringLength.toLocaleString("en-US")} string characters; OpenAI allows at most 15,000 in this case.`,
           "Shorten or reduce the enum values.",
         ),
@@ -418,7 +441,7 @@ function visitSchema(
     for (const [propertyName, propertySchema] of Object.entries(properties)) {
       visitSchema(
         propertySchema,
-        `${path}.properties.${propertyName}`,
+        appendPath(appendPath(path, "properties"), propertyName),
         nextObjectDepth,
         state,
       );
@@ -441,7 +464,7 @@ function visitSchema(
     )) {
       visitSchema(
         definitionSchema,
-        `${path}.${definitionsKey}.${definitionName}`,
+        appendPath(appendPath(path, definitionsKey), definitionName),
         objectDepth,
         state,
       );
@@ -449,22 +472,165 @@ function visitSchema(
   }
 
   if (isObject(node.items)) {
-    visitSchema(node.items, `${path}.items`, objectDepth, state);
+    visitSchema(node.items, appendPath(path, "items"), objectDepth, state);
   }
 
   if (Array.isArray(node.anyOf)) {
     node.anyOf.forEach((variant, index) => {
-      visitSchema(variant, `${path}.anyOf[${index}]`, objectDepth, state);
+      visitSchema(
+        variant,
+        appendIndex(appendPath(path, "anyOf"), index),
+        objectDepth,
+        state,
+      );
     });
   }
 }
 
-function enforceGlobalLimits(state: TraversalState): void {
+function resolveLocalReference(root: unknown, reference: string): unknown {
+  if (reference === "#") {
+    return root;
+  }
+
+  if (!reference.startsWith("#/")) {
+    return undefined;
+  }
+
+  let current = root;
+
+  for (const rawSegment of reference.slice(2).split("/")) {
+    let segment: string;
+
+    try {
+      segment = decodeURIComponent(rawSegment)
+        .replaceAll("~1", "/")
+        .replaceAll("~0", "~");
+    } catch {
+      return undefined;
+    }
+
+    if (Array.isArray(current)) {
+      if (!/^(0|[1-9]\d*)$/.test(segment)) {
+        return undefined;
+      }
+
+      current = current[Number(segment)];
+      continue;
+    }
+
+    if (!isObject(current) || !(segment in current)) {
+      return undefined;
+    }
+
+    current = current[segment];
+  }
+
+  return current;
+}
+
+function computeMaxObjectDepth(root: unknown): number {
+  let maxDepth = 0;
+
+  function visitDepth(
+    node: unknown,
+    depth: number,
+    activeNodes: Set<JsonObject>,
+  ): void {
+    if (!isObject(node) || activeNodes.has(node)) {
+      return;
+    }
+
+    const nextActiveNodes = new Set(activeNodes);
+    nextActiveNodes.add(node);
+
+    const properties = isObject(node.properties) ? node.properties : null;
+    const isObjectSchema = node.type === "object" || properties !== null;
+    const childDepth = isObjectSchema ? depth + 1 : depth;
+
+    if (isObjectSchema) {
+      maxDepth = Math.max(maxDepth, childDepth);
+    }
+
+    if (typeof node.$ref === "string") {
+      visitDepth(
+        resolveLocalReference(root, node.$ref),
+        depth,
+        nextActiveNodes,
+      );
+    }
+
+    if (properties) {
+      for (const propertySchema of Object.values(properties)) {
+        visitDepth(propertySchema, childDepth, nextActiveNodes);
+      }
+    }
+
+    if (isObject(node.items)) {
+      visitDepth(node.items, childDepth, nextActiveNodes);
+    }
+
+    if (Array.isArray(node.anyOf)) {
+      for (const variant of node.anyOf) {
+        visitDepth(variant, depth, nextActiveNodes);
+      }
+    }
+  }
+
+  visitDepth(root, 0, new Set());
+
+  const visitedForDefinitions = new Set<JsonObject>();
+
+  function visitDefinitions(node: unknown): void {
+    if (!isObject(node) || visitedForDefinitions.has(node)) {
+      return;
+    }
+
+    visitedForDefinitions.add(node);
+
+    const properties = isObject(node.properties) ? node.properties : null;
+    if (properties) {
+      for (const propertySchema of Object.values(properties)) {
+        visitDefinitions(propertySchema);
+      }
+    }
+
+    if (isObject(node.items)) {
+      visitDefinitions(node.items);
+    }
+
+    if (Array.isArray(node.anyOf)) {
+      for (const variant of node.anyOf) {
+        visitDefinitions(variant);
+      }
+    }
+
+    for (const definitionsKey of ["$defs", "definitions"] as const) {
+      const definitions = node[definitionsKey];
+      if (!isObject(definitions)) {
+        continue;
+      }
+
+      for (const definitionSchema of Object.values(definitions)) {
+        visitDepth(definitionSchema, 0, new Set());
+        visitDefinitions(definitionSchema);
+      }
+    }
+  }
+
+  visitDefinitions(root);
+  return maxDepth;
+}
+
+function enforceGlobalLimits(
+  state: TraversalState,
+  sourcePath: string,
+): void {
   if (state.stats.propertyCount > 5_000) {
     state.errors.push(
-      makeDiagnostic(
+      createDiagnostic(
+        "error",
         "too_many_properties",
-        "$",
+        sourcePath,
         `The schema declares ${state.stats.propertyCount.toLocaleString("en-US")} object properties; OpenAI allows at most 5,000.`,
         "Split the task into smaller schemas or remove unused properties.",
       ),
@@ -473,9 +639,10 @@ function enforceGlobalLimits(state: TraversalState): void {
 
   if (state.stats.maxObjectDepth > 10) {
     state.errors.push(
-      makeDiagnostic(
+      createDiagnostic(
+        "error",
         "object_nesting_too_deep",
-        "$",
+        sourcePath,
         `The schema reaches ${state.stats.maxObjectDepth} object levels; OpenAI allows at most 10.`,
         "Flatten nested objects or split the task into smaller schemas.",
       ),
@@ -484,9 +651,10 @@ function enforceGlobalLimits(state: TraversalState): void {
 
   if (state.stats.totalStringLength > 120_000) {
     state.errors.push(
-      makeDiagnostic(
+      createDiagnostic(
+        "error",
         "schema_text_too_long",
-        "$",
+        sourcePath,
         `Counted schema strings total ${state.stats.totalStringLength.toLocaleString("en-US")} characters; OpenAI allows at most 120,000.`,
         "Shorten property and definition names, enum values, or const values.",
       ),
@@ -495,9 +663,10 @@ function enforceGlobalLimits(state: TraversalState): void {
 
   if (state.stats.enumValueCount > 1_000) {
     state.errors.push(
-      makeDiagnostic(
+      createDiagnostic(
+        "error",
         "too_many_enum_values",
-        "$",
+        sourcePath,
         `The schema declares ${state.stats.enumValueCount.toLocaleString("en-US")} enum values; OpenAI allows at most 1,000 across the schema.`,
         "Reduce enum values or split the task into smaller schemas.",
       ),
@@ -528,7 +697,7 @@ export function validateOpenAISchema(input: unknown): ValidationResult {
         ],
         warnings: [],
         fixedSchema: null,
-        stats: EMPTY_STATS,
+        stats: { ...EMPTY_STATS },
       };
     }
   }
@@ -540,9 +709,10 @@ export function validateOpenAISchema(input: unknown): ValidationResult {
 
   if (objectSchema.type !== "object") {
     errors.push(
-      makeDiagnostic(
+      createDiagnostic(
+        "error",
         "root_must_be_object",
-        `${extracted.sourcePath}.type`,
+        appendPath(extracted.sourcePath, "type"),
         'The root schema must set "type" to "object".',
         'Wrap the schema in an object and set "type": "object".',
       ),
@@ -551,9 +721,10 @@ export function validateOpenAISchema(input: unknown): ValidationResult {
 
   if ("anyOf" in objectSchema) {
     errors.push(
-      makeDiagnostic(
+      createDiagnostic(
+        "error",
         "root_any_of",
-        `${extracted.sourcePath}.anyOf`,
+        appendPath(extracted.sourcePath, "anyOf"),
         'The root schema cannot use "anyOf".',
         'Move the union into a property and keep the root "type" as "object".',
       ),
@@ -568,7 +739,8 @@ export function validateOpenAISchema(input: unknown): ValidationResult {
     changed: false,
   };
   visitSchema(fixedSchema, extracted.sourcePath, 0, traversalState);
-  enforceGlobalLimits(traversalState);
+  traversalState.stats.maxObjectDepth = computeMaxObjectDepth(fixedSchema);
+  enforceGlobalLimits(traversalState, extracted.sourcePath);
 
   return {
     ruleVersion: RULE_VERSION,
