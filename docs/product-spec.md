@@ -3,6 +3,7 @@
 Status: implementation-ready
 Rule source checked: 2026-07-30
 Canonical source: https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas
+Function tool shape source: https://developers.openai.com/api/docs/guides/function-calling#defining-functions
 
 ## Product promise
 
@@ -36,10 +37,15 @@ Tests observe only these seams.
 - A Chat Completions `response_format.json_schema.schema` wrapper.
 - A Responses API `text.format.schema` wrapper.
 - A function definition with `parameters`.
-- A request containing `tools[].function.parameters`.
+- A Chat Completions request containing `tools[].function.parameters`.
+- A Responses API request containing a flat function tool at
+  `tools[].parameters`.
 
 The validator extracts and validates the first recognized schema and reports
-where it was found.
+where it was found. `type: "json_schema"` and `type: "function"` are recognized
+wrapper discriminators; any other top-level `type`, a `$`-prefixed schema
+marker, or another structural schema keyword takes precedence as a bare schema
+so an unknown annotation cannot be mistaken for a request wrapper.
 
 ## MVP rules
 
@@ -81,12 +87,17 @@ Warnings:
 
 Safe auto-fixes:
 
-- Add missing `required` entries for declared properties.
-- Remove unknown names from `required`.
+- Add missing `required` entries when there are no simultaneous undeclared
+  required names.
+- Remove unknown names from `required` when there are no simultaneous
+  declared-but-not-required properties.
 - Set `additionalProperties` to `false` on object schemas.
+- Preserve the complete recognized request wrapper around the repaired schema.
 
 Auto-fix does not rewrite root types, composition, limits, references, enums,
-or unknown keywords.
+or unknown keywords. It does not guess between the two sides of a likely
+property-name typo. A fixed candidate is exposed only after a second validation
+pass confirms that it has no remaining errors.
 
 Diagnostic budgets:
 
@@ -174,6 +185,10 @@ The page should feel like a precise engineering instrument:
 - Shared `$ref` graphs do not cause repeated exponential traversal.
 - Diagnostic, request, and response size budgets are enforced.
 - All supported wrappers resolve to the same schema result.
+- Safe fixes preserve supported wrappers and are offered only when the repaired
+  result passes every error rule.
+- Ambiguous `properties` and `required` name mismatches are diagnosed without
+  automatic rewriting.
 - The API mirrors the core result and rejects bad requests.
 - The primary browser workflow passes at desktop and narrow mobile widths.
 - Typecheck, lint, unit tests, production build, and Playwright smoke test pass.

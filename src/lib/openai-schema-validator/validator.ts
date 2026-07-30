@@ -349,8 +349,37 @@ type ExtractedSchema = {
   sourcePath: string;
 };
 
+function hasBareSchemaRootSignals(input: JsonObject): boolean {
+  if (hasOwn(input, "type")) {
+    const declaredType = getOwn(input, "type");
+    return declaredType !== "json_schema" && declaredType !== "function";
+  }
+
+  if (Object.keys(input).some((key) => key.startsWith("$"))) {
+    return true;
+  }
+
+  const isDirectWrapper =
+    hasOwn(input, "schema") || hasOwn(input, "parameters");
+
+  for (const keyword of KNOWN_SCHEMA_KEYWORDS) {
+    if (
+      !(keyword === "description" && isDirectWrapper) &&
+      hasOwn(input, keyword)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function extractSchema(input: unknown): ExtractedSchema {
   if (!isObject(input)) {
+    return { schema: input, sourcePath: "$" };
+  }
+
+  if (hasBareSchemaRootSignals(input)) {
     return { schema: input, sourcePath: "$" };
   }
 
@@ -379,15 +408,25 @@ function extractSchema(input: unknown): ExtractedSchema {
   const tools = getOwn(input, "tools");
   if (Array.isArray(tools)) {
     for (const [index, tool] of tools.entries()) {
-      const toolFunction = isObject(tool) ? getOwn(tool, "function") : null;
-      if (!isObject(tool) || !isObject(toolFunction)) {
+      if (!isObject(tool)) {
         continue;
       }
 
-      if (hasOwn(toolFunction, "parameters")) {
+      const toolFunction = getOwn(tool, "function");
+      if (isObject(toolFunction) && hasOwn(toolFunction, "parameters")) {
         return {
           schema: getOwn(toolFunction, "parameters"),
           sourcePath: `$.tools[${index}].function.parameters`,
+        };
+      }
+
+      if (
+        getOwn(tool, "type") === "function" &&
+        hasOwn(tool, "parameters")
+      ) {
+        return {
+          schema: getOwn(tool, "parameters"),
+          sourcePath: `$.tools[${index}].parameters`,
         };
       }
     }
@@ -769,11 +808,27 @@ function visitSchema(
       const declaredRequired: string[] = requiredIsStringArray
         ? requiredValue
         : [];
+      const propertyNameSet = new Set(propertyNames);
+      const declaredRequiredSet = new Set(declaredRequired);
+      const undeclaredRequired = hasMalformedProperties
+        ? []
+        : declaredRequired.filter(
+            (propertyName) => !propertyNameSet.has(propertyName),
+          );
+      const missingRequired = hasMalformedProperties
+        ? []
+        : propertyNames.filter(
+            (propertyName) => !declaredRequiredSet.has(propertyName),
+          );
+      const hasAmbiguousRequiredMismatch =
+        undeclaredRequired.length > 0 && missingRequired.length > 0;
       const fixedRequired = hasMalformedProperties
         ? [...declaredRequired]
-        : declaredRequired.filter((propertyName) =>
-            propertyNames.includes(propertyName),
-          );
+        : hasAmbiguousRequiredMismatch
+          ? [...declaredRequired]
+          : declaredRequired.filter((propertyName) =>
+              propertyNameSet.has(propertyName),
+            );
       let requiredChanged = false;
 
       if (hasOwn(node, "required") && !requiredIsStringArray) {
@@ -789,33 +844,33 @@ function visitSchema(
       }
 
       if (!hasMalformedProperties) {
-        for (const propertyName of declaredRequired) {
-          if (!propertyNames.includes(propertyName)) {
-            addDiagnostic(
-              state,
-              "error",
-              "required_property_not_declared",
-              extendSchemaPath(path, "required"),
-              () =>
-                `"${propertyName}" is listed in "required" but is not declared in "properties".`,
-              () =>
-                `Remove "${propertyName}" from "required" or declare the property.`,
-            );
+        for (const propertyName of undeclaredRequired) {
+          addDiagnostic(
+            state,
+            "error",
+            "required_property_not_declared",
+            extendSchemaPath(path, "required"),
+            () =>
+              `"${propertyName}" is listed in "required" but is not declared in "properties".`,
+            () =>
+              `Remove "${propertyName}" from "required" or declare the property.`,
+          );
+          if (!hasAmbiguousRequiredMismatch) {
             requiredChanged = true;
           }
         }
 
-        for (const propertyName of propertyNames) {
-          if (!fixedRequired.includes(propertyName)) {
-            addDiagnostic(
-              state,
-              "error",
-              "property_must_be_required",
-              extendSchemaPath(path, "required"),
-              () =>
-                `"${propertyName}" is declared in "properties" but missing from "required".`,
-              () => `Add "${propertyName}" to "required".`,
-            );
+        for (const propertyName of missingRequired) {
+          addDiagnostic(
+            state,
+            "error",
+            "property_must_be_required",
+            extendSchemaPath(path, "required"),
+            () =>
+              `"${propertyName}" is declared in "properties" but missing from "required".`,
+            () => `Add "${propertyName}" to "required".`,
+          );
+          if (!hasAmbiguousRequiredMismatch) {
             fixedRequired.push(propertyName);
             requiredChanged = true;
           }
@@ -1203,6 +1258,13 @@ function enforceGlobalLimits(
 }
 
 export function validateOpenAISchema(input: unknown): ValidationResult {
+  return validateOpenAISchemaInternal(input, true);
+}
+
+function validateOpenAISchemaInternal(
+  input: unknown,
+  includeFixedSchema: boolean,
+): ValidationResult {
   let schema = input;
 
   if (typeof input === "string") {
@@ -1231,7 +1293,8 @@ export function validateOpenAISchema(input: unknown): ValidationResult {
     }
   }
 
-  const extracted = extractSchema(schema);
+  const fixedInput = cloneJson(schema);
+  const extracted = extractSchema(fixedInput);
   const objectSchema = isObject(extracted.schema) ? extracted.schema : {};
   const errors: SchemaDiagnostic[] = [];
   const warnings: SchemaDiagnostic[] = [];
@@ -1265,9 +1328,8 @@ export function validateOpenAISchema(input: unknown): ValidationResult {
     );
   }
 
-  const fixedSchema = cloneJson(objectSchema);
-  visitSchema(fixedSchema, extracted.sourcePath, 0, traversalState);
-  const objectDepthAnalysis = computeMaxObjectDepth(fixedSchema);
+  visitSchema(objectSchema, extracted.sourcePath, 0, traversalState);
+  const objectDepthAnalysis = computeMaxObjectDepth(objectSchema);
   traversalState.stats.maxObjectDepth = Math.max(
     traversalState.stats.maxObjectDepth,
     objectDepthAnalysis.maxDepth,
@@ -1282,10 +1344,16 @@ export function validateOpenAISchema(input: unknown): ValidationResult {
     );
   }
   enforceGlobalLimits(traversalState, extracted.sourcePath);
-  const serializableFixedSchema =
-    traversalState.changed && canSerializeAsJson(fixedSchema)
-      ? fixedSchema
-      : null;
+  let serializableFixedSchema: unknown | null = null;
+
+  if (
+    includeFixedSchema &&
+    traversalState.changed &&
+    canSerializeAsJson(fixedInput) &&
+    validateOpenAISchemaInternal(fixedInput, false).valid
+  ) {
+    serializableFixedSchema = fixedInput;
+  }
 
   return {
     ruleVersion: RULE_VERSION,

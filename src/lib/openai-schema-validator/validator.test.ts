@@ -224,6 +224,34 @@ describe("validateOpenAISchema", () => {
     expect(validateOpenAISchema(result.fixedSchema).valid).toBe(true);
   });
 
+  it("does not guess how to fix a likely property-name typo", () => {
+    const input = {
+      type: "object",
+      properties: {
+        emial: { type: "string" },
+      },
+      required: ["email"],
+      additionalProperties: false,
+    };
+
+    const result = validateOpenAISchema(input);
+
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "required_property_not_declared",
+          message: expect.stringContaining('"email"'),
+        }),
+        expect.objectContaining({
+          code: "property_must_be_required",
+          message: expect.stringContaining('"emial"'),
+        }),
+      ]),
+    );
+    expect(result.fixedSchema).toBeNull();
+    expect(input.required).toEqual(["email"]);
+  });
+
   it("does not rewrite required names when properties is malformed", () => {
     const input = {
       type: "object",
@@ -728,6 +756,20 @@ describe("validateOpenAISchema", () => {
         },
         sourcePath: "$.tools[0].function.parameters",
       },
+      {
+        input: {
+          model: "gpt-5.6",
+          tools: [
+            {
+              type: "function",
+              name: "answer",
+              strict: true,
+              parameters: schema,
+            },
+          ],
+        },
+        sourcePath: "$.tools[0].parameters",
+      },
     ];
 
     for (const testCase of cases) {
@@ -735,6 +777,142 @@ describe("validateOpenAISchema", () => {
       expect(result.valid, testCase.sourcePath).toBe(true);
       expect(result.sourcePath).toBe(testCase.sourcePath);
     }
+  });
+
+  it("does not mistake a bare schema tools annotation for a request wrapper", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        outer: { type: "string" },
+      },
+      required: ["outer"],
+      additionalProperties: false,
+      tools: [
+        {
+          type: "function",
+          parameters: {
+            type: "object",
+            properties: {
+              inner: { type: "string" },
+            },
+            required: [],
+            additionalProperties: false,
+          },
+        },
+      ],
+    });
+
+    expect(result.sourcePath).toBe("$");
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({
+        code: "unknown_keyword",
+        path: "$.tools",
+      }),
+    );
+    expect(result.fixedSchema).toBeNull();
+  });
+
+  it("does not let a wrapper-like annotation hide a bare root error", () => {
+    const result = validateOpenAISchema({
+      type: "string",
+      tools: [
+        {
+          type: "function",
+          parameters: {
+            type: "object",
+            properties: {},
+            required: [],
+            additionalProperties: false,
+          },
+        },
+      ],
+    });
+
+    expect(result.sourcePath).toBe("$");
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "root_must_be_object",
+        path: "$.type",
+      }),
+    );
+    expect(result.fixedSchema).toBeNull();
+  });
+
+  it("recognizes a JSON Schema dialect marker before wrapper-like annotations", () => {
+    const result = validateOpenAISchema({
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      title: "Bare schema",
+      tools: [
+        {
+          type: "function",
+          parameters: {
+            type: "object",
+            properties: {},
+            required: [],
+            additionalProperties: false,
+          },
+        },
+      ],
+    });
+
+    expect(result.sourcePath).toBe("$");
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "root_must_be_object",
+        path: "$.type",
+      }),
+    );
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({
+        code: "unknown_keyword",
+        path: "$.$schema",
+      }),
+    );
+  });
+
+  it("preserves a Responses text-format wrapper when applying safe fixes", () => {
+    const input = {
+      model: "gpt-5.6",
+      input: "Return a short answer.",
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          strict: true,
+          schema: {
+            type: "object",
+            properties: { answer: { type: "string" } },
+            required: [],
+            additionalProperties: false,
+          },
+        },
+      },
+    };
+
+    const result = validateOpenAISchema(input);
+
+    expect(result.sourcePath).toBe("$.text.format.schema");
+    expect(result.fixedSchema).toEqual({
+      model: "gpt-5.6",
+      input: "Return a short answer.",
+      text: {
+        format: {
+          type: "json_schema",
+          name: "answer",
+          strict: true,
+          schema: {
+            type: "object",
+            properties: { answer: { type: "string" } },
+            required: ["answer"],
+            additionalProperties: false,
+          },
+        },
+      },
+    });
+    expect(input.text.format.schema.required).toEqual([]);
   });
 
   it("preserves a wrapper source path when its schema value is malformed", () => {
@@ -841,6 +1019,33 @@ describe("validateOpenAISchema", () => {
         code: "unsupported_format",
         path: "$.properties.website.format",
       }),
+    );
+    expect(result.fixedSchema).toBeNull();
+  });
+
+  it("does not offer a partially fixed schema that still has hard errors", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        website: {
+          type: "string",
+          format: "uri",
+        },
+      },
+      required: ["website"],
+    });
+
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "additional_properties_must_be_false",
+          path: "$.additionalProperties",
+        }),
+        expect.objectContaining({
+          code: "unsupported_format",
+          path: "$.properties.website.format",
+        }),
+      ]),
     );
     expect(result.fixedSchema).toBeNull();
   });

@@ -55,3 +55,52 @@ test("editing the schema invalidates an older suggested fix", async ({
   ).toBeVisible();
   await expect(editor).toHaveValue(replacement);
 });
+
+test("safe fixes preserve the complete OpenAI request wrapper", async ({
+  page,
+}) => {
+  const wrapper = {
+    model: "gpt-5.6",
+    input: "Return an answer.",
+    text: {
+      format: {
+        type: "json_schema",
+        name: "answer",
+        strict: true,
+        schema: {
+          type: "object",
+          properties: {
+            answer: { type: "string" },
+          },
+          required: [],
+          additionalProperties: false,
+        },
+      },
+    },
+  };
+
+  await page.goto("/");
+
+  const editor = page.getByRole("textbox", { name: "JSON Schema input" });
+  await editor.fill(JSON.stringify(wrapper, null, 2));
+  await page.getByRole("button", { name: "Validate schema" }).click();
+
+  await expect(page.getByText("1 error", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Apply safe fixes" }).click();
+
+  await expect(
+    page.getByText("Documented rules pass", { exact: true }),
+  ).toBeVisible();
+  expect(JSON.parse(await editor.inputValue())).toEqual({
+    ...wrapper,
+    text: {
+      format: {
+        ...wrapper.text.format,
+        schema: {
+          ...wrapper.text.format.schema,
+          required: ["answer"],
+        },
+      },
+    },
+  });
+});

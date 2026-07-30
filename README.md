@@ -37,6 +37,24 @@ The public validator accepts:
 - `text.format.schema`
 - a function definition with `parameters`
 - `tools[].function.parameters`
+- Responses API function tools with `tools[].parameters`
+
+Top-level `type: "json_schema"` and `type: "function"` remain wrapper
+discriminators. Any other top-level `type`, a `$`-prefixed dialect or reference
+marker, or a structural schema keyword such as `properties` or `required`
+makes the input a bare schema before wrapper matching so unknown annotations
+cannot redirect validation into nested data.
+
+## Safe fixes
+
+Repairs run on a clone of the complete accepted input. When the input is an
+OpenAI request wrapper, `fixedSchema` preserves that wrapper and changes only
+the extracted schema.
+
+A fixed result is returned only after the repaired candidate passes every hard
+validation rule. If undeclared `required` names and declared-but-not-required
+properties appear together, the validator reports both sides and leaves the
+names unchanged rather than guessing which one is a typo.
 
 ## Local development
 

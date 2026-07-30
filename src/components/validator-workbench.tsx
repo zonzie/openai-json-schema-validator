@@ -367,7 +367,7 @@ export function ValidatorWorkbench() {
           </div>
           <div className={styles.fixPreview}>
             <div>
-              <span>Fixed schema preview</span>
+              <span>Fixed JSON preview</span>
               <span>{fixedText.split("\n").length} lines</span>
             </div>
             <pre>{fixedText}</pre>
