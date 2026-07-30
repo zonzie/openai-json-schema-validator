@@ -15,6 +15,10 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
 export async function POST(request: Request): Promise<Response> {
   let body: unknown;
 
@@ -24,16 +28,17 @@ export async function POST(request: Request): Promise<Response> {
     return invalidRequest();
   }
 
-  if (!isObject(body) || !("schema" in body)) {
+  if (!isObject(body) || !hasOwn(body, "schema")) {
     return invalidRequest();
   }
 
+  const schema = body.schema;
   if (
-    body.schema === null ||
-    (typeof body.schema !== "string" && typeof body.schema !== "object")
+    schema === null ||
+    (typeof schema !== "string" && typeof schema !== "object")
   ) {
     return invalidRequest();
   }
 
-  return Response.json(validateOpenAISchema(body.schema));
+  return Response.json(validateOpenAISchema(schema));
 }

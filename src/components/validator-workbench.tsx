@@ -129,7 +129,7 @@ export function ValidatorWorkbench() {
   );
 
   const fixedText =
-    result.fixedSchema === null
+    isDirty || result.fixedSchema === null
       ? null
       : JSON.stringify(result.fixedSchema, null, 2);
   const diagnostics = [...result.errors, ...result.warnings];

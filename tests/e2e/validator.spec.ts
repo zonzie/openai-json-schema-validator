@@ -23,3 +23,35 @@ test("user can diagnose and repair a strict-mode schema", async ({ page }) => {
   expect(editorValue).toContain('"required": [');
   expect(editorValue.match(/"additionalProperties": false/g)?.length).toBe(2);
 });
+
+test("editing the schema invalidates an older suggested fix", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const editor = page.getByRole("textbox", { name: "JSON Schema input" });
+  const applyFixes = page.getByRole("button", { name: "Apply safe fixes" });
+  const replacement = JSON.stringify(
+    {
+      type: "object",
+      properties: {
+        user_marker: { type: "string" },
+      },
+      required: ["user_marker"],
+      additionalProperties: false,
+    },
+    null,
+    2,
+  );
+
+  await expect(applyFixes).toBeVisible();
+  await editor.fill(replacement);
+  await expect(applyFixes).toBeHidden();
+
+  await page.getByRole("button", { name: "Validate schema" }).click();
+
+  await expect(
+    page.getByText("Documented rules pass", { exact: true }),
+  ).toBeVisible();
+  await expect(editor).toHaveValue(replacement);
+});

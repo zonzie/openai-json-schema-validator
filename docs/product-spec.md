@@ -48,6 +48,7 @@ Errors:
 - Input must be valid JSON.
 - The root schema must be an object with `type: "object"`.
 - Root-level `anyOf` is not allowed.
+- When present, `properties` must be an object whose values are schemas.
 - Every object must set `additionalProperties: false`.
 - Every key in an object's `properties` must appear in its `required` array.
 - Every name in `required` must exist in `properties`.

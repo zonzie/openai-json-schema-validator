@@ -125,6 +125,22 @@ function isStringArray(value: unknown): value is string[] {
   );
 }
 
+function hasOwn(node: JsonObject, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(node, key);
+}
+
+function getOwn(node: JsonObject, key: string): unknown {
+  return hasOwn(node, key) ? node[key] : undefined;
+}
+
+function declaresType(node: JsonObject, typeName: string): boolean {
+  const declaredType = getOwn(node, "type");
+  return (
+    declaredType === typeName ||
+    (Array.isArray(declaredType) && declaredType.includes(typeName))
+  );
+}
+
 function createDiagnostic(
   severity: DiagnosticSeverity,
   code: string,
@@ -152,18 +168,102 @@ function appendIndex(path: string, index: number): string {
   return `${path}[${index}]`;
 }
 
+type SchemaPath =
+  | { kind: "root"; value: string }
+  | {
+      kind: "segment";
+      parent: SchemaPath;
+      value: string | number;
+    };
+
+function extendSchemaPath(
+  path: SchemaPath,
+  ...segments: Array<string | number>
+): SchemaPath {
+  return segments.reduce<SchemaPath>(
+    (parent, value) => ({ kind: "segment", parent, value }),
+    path,
+  );
+}
+
+function formatSchemaPath(path: SchemaPath): string {
+  const segments: Array<string | number> = [];
+  let current = path;
+
+  while (current.kind === "segment") {
+    segments.push(current.value);
+    current = current.parent;
+  }
+
+  let result = current.value;
+  for (const segment of segments.reverse()) {
+    result =
+      typeof segment === "number"
+        ? appendIndex(result, segment)
+        : appendPath(result, segment);
+  }
+
+  return result;
+}
+
 function cloneJson(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(cloneJson);
+  if (!Array.isArray(value) && !isObject(value)) {
+    return value;
   }
 
-  if (isObject(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, child]) => [key, cloneJson(child)]),
-    );
+  const rootClone: JsonObject | unknown[] = Array.isArray(value)
+    ? new Array(value.length)
+    : {};
+  const clones = new Map<object, JsonObject | unknown[]>([[value, rootClone]]);
+  const pending: Array<JsonObject | unknown[]> = [value];
+
+  while (pending.length > 0) {
+    const source = pending.pop();
+    if (!source) {
+      continue;
+    }
+
+    const target = clones.get(source);
+    if (!target) {
+      continue;
+    }
+
+    for (const [key, child] of Object.entries(source)) {
+      let clonedChild = child;
+
+      if (Array.isArray(child) || isObject(child)) {
+        const existingClone = clones.get(child);
+        if (existingClone) {
+          clonedChild = existingClone;
+        } else {
+          const childClone: JsonObject | unknown[] = Array.isArray(child)
+            ? new Array(child.length)
+            : {};
+          clones.set(child, childClone);
+          pending.push(child);
+          clonedChild = childClone;
+        }
+      }
+
+      Object.defineProperty(target, key, {
+        configurable: true,
+        enumerable: true,
+        value: clonedChild,
+        writable: true,
+      });
+    }
   }
 
-  return value;
+  return rootClone;
+}
+
+function canSerializeAsJson(value: unknown): boolean {
+  try {
+    JSON.stringify(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 type ExtractedSchema = {
@@ -176,49 +276,54 @@ function extractSchema(input: unknown): ExtractedSchema {
     return { schema: input, sourcePath: "$" };
   }
 
-  const responseFormat = input.response_format;
+  const responseFormat = getOwn(input, "response_format");
   if (isObject(responseFormat)) {
-    const jsonSchema = responseFormat.json_schema;
-    if (isObject(jsonSchema) && "schema" in jsonSchema) {
+    const jsonSchema = getOwn(responseFormat, "json_schema");
+    if (isObject(jsonSchema) && hasOwn(jsonSchema, "schema")) {
       return {
-        schema: jsonSchema.schema,
+        schema: getOwn(jsonSchema, "schema"),
         sourcePath: "$.response_format.json_schema.schema",
       };
     }
   }
 
-  const text = input.text;
+  const text = getOwn(input, "text");
   if (isObject(text)) {
-    const format = text.format;
-    if (isObject(format) && "schema" in format) {
+    const format = getOwn(text, "format");
+    if (isObject(format) && hasOwn(format, "schema")) {
       return {
-        schema: format.schema,
+        schema: getOwn(format, "schema"),
         sourcePath: "$.text.format.schema",
       };
     }
   }
 
-  if (Array.isArray(input.tools)) {
-    for (const [index, tool] of input.tools.entries()) {
-      if (!isObject(tool) || !isObject(tool.function)) {
+  const tools = getOwn(input, "tools");
+  if (Array.isArray(tools)) {
+    for (const [index, tool] of tools.entries()) {
+      const toolFunction = isObject(tool) ? getOwn(tool, "function") : null;
+      if (!isObject(tool) || !isObject(toolFunction)) {
         continue;
       }
 
-      if ("parameters" in tool.function) {
+      if (hasOwn(toolFunction, "parameters")) {
         return {
-          schema: tool.function.parameters,
+          schema: getOwn(toolFunction, "parameters"),
           sourcePath: `$.tools[${index}].function.parameters`,
         };
       }
     }
   }
 
-  if (input.type !== "object" && "schema" in input) {
-    return { schema: input.schema, sourcePath: "$.schema" };
+  if (!declaresType(input, "object") && hasOwn(input, "schema")) {
+    return { schema: getOwn(input, "schema"), sourcePath: "$.schema" };
   }
 
-  if (input.type !== "object" && "parameters" in input) {
-    return { schema: input.parameters, sourcePath: "$.parameters" };
+  if (!declaresType(input, "object") && hasOwn(input, "parameters")) {
+    return {
+      schema: getOwn(input, "parameters"),
+      sourcePath: "$.parameters",
+    };
   }
 
   return { schema: input, sourcePath: "$" };
@@ -231,259 +336,400 @@ type TraversalState = {
   changed: boolean;
 };
 
-function visitSchema(
-  node: unknown,
-  path: string,
-  objectDepth: number,
-  state: TraversalState,
-): void {
-  if (!isObject(node)) {
-    return;
-  }
-
-  for (const keyword of UNSUPPORTED_COMPOSITION_KEYWORDS) {
-    if (keyword in node) {
-      state.errors.push(
-        createDiagnostic(
-          "error",
-          "unsupported_keyword",
-          appendPath(path, keyword),
-          `"${keyword}" is not supported by OpenAI Structured Outputs.`,
-          `Remove "${keyword}" or express the constraint with the supported JSON Schema subset.`,
-        ),
-      );
+type SchemaChild =
+  | {
+      schema: unknown;
+      relation: "nested" | "definition";
+      location: {
+        kind: "named";
+        container:
+          | "properties"
+          | "patternProperties"
+          | "$defs"
+          | "definitions";
+        name: string;
+      };
     }
-  }
-
-  for (const keyword of Object.keys(node)) {
-    if (FINE_TUNED_LIMITED_KEYWORDS.has(keyword)) {
-      state.warnings.push(
-        createDiagnostic(
-          "warning",
-          "fine_tuned_model_keyword",
-          appendPath(path, keyword),
-          `"${keyword}" is not supported for fine-tuned models.`,
-          "Remove this constraint when targeting a fine-tuned model.",
-        ),
-      );
-    } else if (!KNOWN_SCHEMA_KEYWORDS.has(keyword)) {
-      state.warnings.push(
-        createDiagnostic(
-          "warning",
-          "unknown_keyword",
-          appendPath(path, keyword),
-          `"${keyword}" is not listed in OpenAI's documented Structured Outputs subset.`,
-          "Verify this keyword against the current OpenAI documentation.",
-        ),
-      );
+  | {
+      schema: unknown;
+      relation: "nested";
+      location: { kind: "single"; key: "items" };
     }
-  }
+  | {
+      schema: unknown;
+      relation: "same";
+      location: { kind: "indexed"; container: "anyOf"; index: number };
+    };
 
-  if (
-    "format" in node &&
-    (typeof node.format !== "string" ||
-      !SUPPORTED_STRING_FORMATS.has(node.format))
-  ) {
-    state.errors.push(
-      createDiagnostic(
-        "error",
-        "unsupported_format",
-        appendPath(path, "format"),
-        `"${String(node.format)}" is not a documented Structured Outputs string format.`,
-        `Use one of: ${Array.from(SUPPORTED_STRING_FORMATS).join(", ")}.`,
-      ),
-    );
-  }
+function getSchemaChildren(node: JsonObject): SchemaChild[] {
+  const children: SchemaChild[] = [];
 
-  if ("type" in node) {
-    const declaredTypes = Array.isArray(node.type) ? node.type : [node.type];
-    const hasUnsupportedType =
-      declaredTypes.length === 0 ||
-      declaredTypes.some(
-        (typeName) =>
-          typeof typeName !== "string" || !SUPPORTED_TYPES.has(typeName),
-      );
-
-    if (hasUnsupportedType) {
-      state.errors.push(
-        createDiagnostic(
-          "error",
-          "unsupported_type",
-          appendPath(path, "type"),
-          `"${Array.isArray(node.type) ? node.type.join(", ") : String(node.type)}" contains a type outside the documented Structured Outputs set.`,
-          `Use one or more of: ${Array.from(SUPPORTED_TYPES).join(", ")}.`,
-        ),
-      );
-    }
-  }
-
-  const properties = isObject(node.properties) ? node.properties : null;
-  const isObjectSchema = node.type === "object" || properties !== null;
-  const nextObjectDepth = isObjectSchema ? objectDepth + 1 : objectDepth;
-
-  if (isObjectSchema) {
-    state.stats.maxObjectDepth = Math.max(
-      state.stats.maxObjectDepth,
-      nextObjectDepth,
-    );
-
-    if (node.additionalProperties !== false) {
-      state.errors.push(
-        createDiagnostic(
-          "error",
-          "additional_properties_must_be_false",
-          appendPath(path, "additionalProperties"),
-          'Every object schema must set "additionalProperties" to false.',
-          'Set "additionalProperties": false on this object.',
-        ),
-      );
-      node.additionalProperties = false;
-      state.changed = true;
-    }
-
-    const propertyNames = properties ? Object.keys(properties) : [];
-
-    if (properties) {
-      state.stats.propertyCount += propertyNames.length;
-      state.stats.totalStringLength += propertyNames.reduce(
-        (total, propertyName) => total + propertyName.length,
-        0,
-      );
-    }
-
-    const requiredValue = node.required;
-    const requiredIsStringArray = isStringArray(requiredValue);
-    const declaredRequired: string[] = requiredIsStringArray
-      ? requiredValue
-      : [];
-    const fixedRequired = declaredRequired.filter((propertyName) =>
-      propertyNames.includes(propertyName),
-    );
-    let requiredChanged = false;
-
-    if ("required" in node && !requiredIsStringArray) {
-      state.errors.push(
-        createDiagnostic(
-          "error",
-          "required_must_be_string_array",
-          appendPath(path, "required"),
-          '"required" must be an array of property-name strings.',
-          'Replace "required" with an array containing declared property names.',
-        ),
-      );
-      requiredChanged = true;
-    }
-
-    for (const propertyName of declaredRequired) {
-      if (!propertyNames.includes(propertyName)) {
-        state.errors.push(
-          createDiagnostic(
-            "error",
-            "required_property_not_declared",
-            appendPath(path, "required"),
-            `"${propertyName}" is listed in "required" but is not declared in "properties".`,
-            `Remove "${propertyName}" from "required" or declare the property.`,
-          ),
-        );
-        requiredChanged = true;
-      }
-    }
-
-    for (const propertyName of propertyNames) {
-      if (!fixedRequired.includes(propertyName)) {
-        state.errors.push(
-          createDiagnostic(
-            "error",
-            "property_must_be_required",
-            appendPath(path, "required"),
-            `"${propertyName}" is declared in "properties" but missing from "required".`,
-            `Add "${propertyName}" to "required".`,
-          ),
-        );
-        fixedRequired.push(propertyName);
-        requiredChanged = true;
-      }
-    }
-
-    if (requiredChanged) {
-      node.required = fixedRequired;
-      state.changed = true;
-    }
-  }
-
-  if (Array.isArray(node.enum)) {
-    state.stats.enumValueCount += node.enum.length;
-    const enumStringLength = node.enum.reduce(
-      (total: number, value: unknown) =>
-        total + (typeof value === "string" ? value.length : 0),
-      0,
-    );
-    state.stats.totalStringLength += enumStringLength;
-
-    if (node.enum.length > 250 && enumStringLength > 15_000) {
-      state.errors.push(
-        createDiagnostic(
-          "error",
-          "enum_string_values_too_long",
-          appendPath(path, "enum"),
-          `This enum has more than 250 values and ${enumStringLength.toLocaleString("en-US")} string characters; OpenAI allows at most 15,000 in this case.`,
-          "Shorten or reduce the enum values.",
-        ),
-      );
-    }
-  }
-
-  if (typeof node.const === "string") {
-    state.stats.totalStringLength += node.const.length;
-  }
-
-  if (properties) {
-    for (const [propertyName, propertySchema] of Object.entries(properties)) {
-      visitSchema(
-        propertySchema,
-        appendPath(appendPath(path, "properties"), propertyName),
-        nextObjectDepth,
-        state,
-      );
-    }
-  }
-
-  for (const definitionsKey of ["$defs", "definitions"] as const) {
-    const definitions = node[definitionsKey];
-    if (!isObject(definitions)) {
+  for (const container of ["properties", "patternProperties"] as const) {
+    const schemas = getOwn(node, container);
+    if (!isObject(schemas)) {
       continue;
     }
 
-    state.stats.totalStringLength += Object.keys(definitions).reduce(
-      (total, definitionName) => total + definitionName.length,
-      0,
-    );
-
-    for (const [definitionName, definitionSchema] of Object.entries(
-      definitions,
-    )) {
-      visitSchema(
-        definitionSchema,
-        appendPath(appendPath(path, definitionsKey), definitionName),
-        objectDepth,
-        state,
-      );
+    for (const [name, schema] of Object.entries(schemas)) {
+      children.push({
+        schema,
+        relation: "nested",
+        location: { kind: "named", container, name },
+      });
     }
   }
 
-  if (isObject(node.items)) {
-    visitSchema(node.items, appendPath(path, "items"), objectDepth, state);
+  for (const container of ["$defs", "definitions"] as const) {
+    const schemas = getOwn(node, container);
+    if (!isObject(schemas)) {
+      continue;
+    }
+
+    for (const [name, schema] of Object.entries(schemas)) {
+      children.push({
+        schema,
+        relation: "definition",
+        location: { kind: "named", container, name },
+      });
+    }
   }
 
-  if (Array.isArray(node.anyOf)) {
-    node.anyOf.forEach((variant, index) => {
-      visitSchema(
-        variant,
-        appendIndex(appendPath(path, "anyOf"), index),
-        objectDepth,
-        state,
-      );
+  const items = getOwn(node, "items");
+  if (isObject(items)) {
+    children.push({
+      schema: items,
+      relation: "nested",
+      location: { kind: "single", key: "items" },
     });
+  }
+
+  const anyOf = getOwn(node, "anyOf");
+  if (Array.isArray(anyOf)) {
+    anyOf.forEach((schema, index) => {
+      children.push({
+        schema,
+        relation: "same",
+        location: { kind: "indexed", container: "anyOf", index },
+      });
+    });
+  }
+
+  return children;
+}
+
+function extendChildPath(path: SchemaPath, child: SchemaChild): SchemaPath {
+  if (child.location.kind === "named") {
+    return extendSchemaPath(
+      path,
+      child.location.container,
+      child.location.name,
+    );
+  }
+
+  if (child.location.kind === "indexed") {
+    return extendSchemaPath(
+      path,
+      child.location.container,
+      child.location.index,
+    );
+  }
+
+  return extendSchemaPath(path, child.location.key);
+}
+
+function visitSchema(
+  root: unknown,
+  sourcePath: string,
+  objectDepth: number,
+  state: TraversalState,
+): void {
+  type PendingSchema = {
+    node: unknown;
+    path: SchemaPath;
+    objectDepth: number;
+  };
+
+  const pending: PendingSchema[] = [
+    {
+      node: root,
+      path: { kind: "root", value: sourcePath },
+      objectDepth,
+    },
+  ];
+  const visited = new Set<JsonObject>();
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current) {
+      continue;
+    }
+
+    if (!isObject(current.node)) {
+      state.errors.push(
+        createDiagnostic(
+          "error",
+          "schema_must_be_object",
+          formatSchemaPath(current.path),
+          "Each nested schema must be a JSON object.",
+          "Replace this value with an object containing supported schema keywords.",
+        ),
+      );
+      continue;
+    }
+
+    if (visited.has(current.node)) {
+      continue;
+    }
+
+    const { node, path } = current;
+    visited.add(node);
+
+    for (const keyword of UNSUPPORTED_COMPOSITION_KEYWORDS) {
+      if (hasOwn(node, keyword)) {
+        state.errors.push(
+          createDiagnostic(
+            "error",
+            "unsupported_keyword",
+            formatSchemaPath(extendSchemaPath(path, keyword)),
+            `"${keyword}" is not supported by OpenAI Structured Outputs.`,
+            `Remove "${keyword}" or express the constraint with the supported JSON Schema subset.`,
+          ),
+        );
+      }
+    }
+
+    for (const keyword of Object.keys(node)) {
+      if (FINE_TUNED_LIMITED_KEYWORDS.has(keyword)) {
+        state.warnings.push(
+          createDiagnostic(
+            "warning",
+            "fine_tuned_model_keyword",
+            formatSchemaPath(extendSchemaPath(path, keyword)),
+            `"${keyword}" is not supported for fine-tuned models.`,
+            "Remove this constraint when targeting a fine-tuned model.",
+          ),
+        );
+      } else if (!KNOWN_SCHEMA_KEYWORDS.has(keyword)) {
+        state.warnings.push(
+          createDiagnostic(
+            "warning",
+            "unknown_keyword",
+            formatSchemaPath(extendSchemaPath(path, keyword)),
+            `"${keyword}" is not listed in OpenAI's documented Structured Outputs subset.`,
+            "Verify this keyword against the current OpenAI documentation.",
+          ),
+        );
+      }
+    }
+
+    const formatValue = getOwn(node, "format");
+    if (
+      hasOwn(node, "format") &&
+      (typeof formatValue !== "string" ||
+        !SUPPORTED_STRING_FORMATS.has(formatValue))
+    ) {
+      state.errors.push(
+        createDiagnostic(
+          "error",
+          "unsupported_format",
+          formatSchemaPath(extendSchemaPath(path, "format")),
+          `"${String(formatValue)}" is not a documented Structured Outputs string format.`,
+          `Use one of: ${Array.from(SUPPORTED_STRING_FORMATS).join(", ")}.`,
+        ),
+      );
+    }
+
+    const typeValue = getOwn(node, "type");
+    if (hasOwn(node, "type")) {
+      const declaredTypes = Array.isArray(typeValue) ? typeValue : [typeValue];
+      const hasUnsupportedType =
+        declaredTypes.length === 0 ||
+        declaredTypes.some(
+          (typeName) =>
+            typeof typeName !== "string" || !SUPPORTED_TYPES.has(typeName),
+        );
+
+      if (hasUnsupportedType) {
+        state.errors.push(
+          createDiagnostic(
+            "error",
+            "unsupported_type",
+            formatSchemaPath(extendSchemaPath(path, "type")),
+            `"${Array.isArray(typeValue) ? typeValue.join(", ") : String(typeValue)}" contains a type outside the documented Structured Outputs set.`,
+            `Use one or more of: ${Array.from(SUPPORTED_TYPES).join(", ")}.`,
+          ),
+        );
+      }
+    }
+
+    const hasPropertiesKeyword = hasOwn(node, "properties");
+    const propertiesValue = getOwn(node, "properties");
+    const properties = isObject(propertiesValue) ? propertiesValue : null;
+    const hasMalformedProperties = hasPropertiesKeyword && properties === null;
+
+    if (hasMalformedProperties) {
+      state.errors.push(
+        createDiagnostic(
+          "error",
+          "properties_must_be_object",
+          formatSchemaPath(extendSchemaPath(path, "properties")),
+          '"properties" must be an object whose values are schemas.',
+          'Replace "properties" with an object keyed by property name.',
+        ),
+      );
+    }
+
+    const isObjectSchema = declaresType(node, "object") || properties !== null;
+    const nextObjectDepth = isObjectSchema
+      ? current.objectDepth + 1
+      : current.objectDepth;
+
+    if (isObjectSchema) {
+      state.stats.maxObjectDepth = Math.max(
+        state.stats.maxObjectDepth,
+        nextObjectDepth,
+      );
+
+      if (
+        !hasOwn(node, "additionalProperties") ||
+        node.additionalProperties !== false
+      ) {
+        state.errors.push(
+          createDiagnostic(
+            "error",
+            "additional_properties_must_be_false",
+            formatSchemaPath(extendSchemaPath(path, "additionalProperties")),
+            'Every object schema must set "additionalProperties" to false.',
+            'Set "additionalProperties": false on this object.',
+          ),
+        );
+        node.additionalProperties = false;
+        state.changed = true;
+      }
+
+      const propertyNames = properties ? Object.keys(properties) : [];
+
+      if (properties) {
+        state.stats.propertyCount += propertyNames.length;
+        state.stats.totalStringLength += propertyNames.reduce(
+          (total, propertyName) => total + propertyName.length,
+          0,
+        );
+      }
+
+      const requiredValue = getOwn(node, "required");
+      const requiredIsStringArray = isStringArray(requiredValue);
+      const declaredRequired: string[] = requiredIsStringArray
+        ? requiredValue
+        : [];
+      const fixedRequired = hasMalformedProperties
+        ? [...declaredRequired]
+        : declaredRequired.filter((propertyName) =>
+            propertyNames.includes(propertyName),
+          );
+      let requiredChanged = false;
+
+      if (hasOwn(node, "required") && !requiredIsStringArray) {
+        state.errors.push(
+          createDiagnostic(
+            "error",
+            "required_must_be_string_array",
+            formatSchemaPath(extendSchemaPath(path, "required")),
+            '"required" must be an array of property-name strings.',
+            'Replace "required" with an array containing declared property names.',
+          ),
+        );
+        requiredChanged = !hasMalformedProperties;
+      }
+
+      if (!hasMalformedProperties) {
+        for (const propertyName of declaredRequired) {
+          if (!propertyNames.includes(propertyName)) {
+            state.errors.push(
+              createDiagnostic(
+                "error",
+                "required_property_not_declared",
+                formatSchemaPath(extendSchemaPath(path, "required")),
+                `"${propertyName}" is listed in "required" but is not declared in "properties".`,
+                `Remove "${propertyName}" from "required" or declare the property.`,
+              ),
+            );
+            requiredChanged = true;
+          }
+        }
+
+        for (const propertyName of propertyNames) {
+          if (!fixedRequired.includes(propertyName)) {
+            state.errors.push(
+              createDiagnostic(
+                "error",
+                "property_must_be_required",
+                formatSchemaPath(extendSchemaPath(path, "required")),
+                `"${propertyName}" is declared in "properties" but missing from "required".`,
+                `Add "${propertyName}" to "required".`,
+              ),
+            );
+            fixedRequired.push(propertyName);
+            requiredChanged = true;
+          }
+        }
+      }
+
+      if (requiredChanged) {
+        node.required = fixedRequired;
+        state.changed = true;
+      }
+    }
+
+    const enumValue = getOwn(node, "enum");
+    if (Array.isArray(enumValue)) {
+      state.stats.enumValueCount += enumValue.length;
+      const enumStringLength = enumValue.reduce(
+        (total: number, value: unknown) =>
+          total + (typeof value === "string" ? value.length : 0),
+        0,
+      );
+      state.stats.totalStringLength += enumStringLength;
+
+      if (enumValue.length > 250 && enumStringLength > 15_000) {
+        state.errors.push(
+          createDiagnostic(
+            "error",
+            "enum_string_values_too_long",
+            formatSchemaPath(extendSchemaPath(path, "enum")),
+            `This enum has more than 250 values and ${enumStringLength.toLocaleString("en-US")} string characters; OpenAI allows at most 15,000 in this case.`,
+            "Shorten or reduce the enum values.",
+          ),
+        );
+      }
+    }
+
+    const constValue = getOwn(node, "const");
+    if (typeof constValue === "string") {
+      state.stats.totalStringLength += constValue.length;
+    }
+
+    const children = getSchemaChildren(node);
+    state.stats.totalStringLength += children.reduce(
+      (total, child) =>
+        child.relation === "definition" &&
+        child.location.kind === "named"
+          ? total + child.location.name.length
+          : total,
+      0,
+    );
+
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      const child = children[index];
+      pending.push({
+        node: child.schema,
+        path: extendChildPath(path, child),
+        objectDepth:
+          child.relation === "nested"
+            ? nextObjectDepth
+            : current.objectDepth,
+      });
+    }
   }
 }
 
@@ -518,7 +764,7 @@ function resolveLocalReference(root: unknown, reference: string): unknown {
       continue;
     }
 
-    if (!isObject(current) || !(segment in current)) {
+    if (!isObject(current) || !hasOwn(current, segment)) {
       return undefined;
     }
 
@@ -531,93 +777,97 @@ function resolveLocalReference(root: unknown, reference: string): unknown {
 function computeMaxObjectDepth(root: unknown): number {
   let maxDepth = 0;
 
-  function visitDepth(
-    node: unknown,
-    depth: number,
-    activeNodes: Set<JsonObject>,
-  ): void {
-    if (!isObject(node) || activeNodes.has(node)) {
-      return;
-    }
+  type DepthFrame =
+    | { kind: "visit"; node: unknown; depth: number }
+    | { kind: "exit"; node: JsonObject };
 
-    const nextActiveNodes = new Set(activeNodes);
-    nextActiveNodes.add(node);
+  function measureFrom(start: unknown): void {
+    const activeNodes = new Set<JsonObject>();
+    const pending: DepthFrame[] = [{ kind: "visit", node: start, depth: 0 }];
 
-    const properties = isObject(node.properties) ? node.properties : null;
-    const isObjectSchema = node.type === "object" || properties !== null;
-    const childDepth = isObjectSchema ? depth + 1 : depth;
-
-    if (isObjectSchema) {
-      maxDepth = Math.max(maxDepth, childDepth);
-    }
-
-    if (typeof node.$ref === "string") {
-      visitDepth(
-        resolveLocalReference(root, node.$ref),
-        depth,
-        nextActiveNodes,
-      );
-    }
-
-    if (properties) {
-      for (const propertySchema of Object.values(properties)) {
-        visitDepth(propertySchema, childDepth, nextActiveNodes);
-      }
-    }
-
-    if (isObject(node.items)) {
-      visitDepth(node.items, childDepth, nextActiveNodes);
-    }
-
-    if (Array.isArray(node.anyOf)) {
-      for (const variant of node.anyOf) {
-        visitDepth(variant, depth, nextActiveNodes);
-      }
-    }
-  }
-
-  visitDepth(root, 0, new Set());
-
-  const visitedForDefinitions = new Set<JsonObject>();
-
-  function visitDefinitions(node: unknown): void {
-    if (!isObject(node) || visitedForDefinitions.has(node)) {
-      return;
-    }
-
-    visitedForDefinitions.add(node);
-
-    const properties = isObject(node.properties) ? node.properties : null;
-    if (properties) {
-      for (const propertySchema of Object.values(properties)) {
-        visitDefinitions(propertySchema);
-      }
-    }
-
-    if (isObject(node.items)) {
-      visitDefinitions(node.items);
-    }
-
-    if (Array.isArray(node.anyOf)) {
-      for (const variant of node.anyOf) {
-        visitDefinitions(variant);
-      }
-    }
-
-    for (const definitionsKey of ["$defs", "definitions"] as const) {
-      const definitions = node[definitionsKey];
-      if (!isObject(definitions)) {
+    while (pending.length > 0) {
+      const frame = pending.pop();
+      if (!frame) {
         continue;
       }
 
-      for (const definitionSchema of Object.values(definitions)) {
-        visitDepth(definitionSchema, 0, new Set());
-        visitDefinitions(definitionSchema);
+      if (frame.kind === "exit") {
+        activeNodes.delete(frame.node);
+        continue;
+      }
+
+      if (!isObject(frame.node) || activeNodes.has(frame.node)) {
+        continue;
+      }
+
+      const node = frame.node;
+      activeNodes.add(node);
+      pending.push({ kind: "exit", node });
+
+      const propertiesValue = getOwn(node, "properties");
+      const properties = isObject(propertiesValue) ? propertiesValue : null;
+      const isObjectSchema =
+        declaresType(node, "object") || properties !== null;
+      const childDepth = isObjectSchema ? frame.depth + 1 : frame.depth;
+
+      if (isObjectSchema) {
+        maxDepth = Math.max(maxDepth, childDepth);
+      }
+
+      const children = getSchemaChildren(node);
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        const child = children[index];
+        if (child.relation === "definition") {
+          continue;
+        }
+
+        pending.push({
+          kind: "visit",
+          node: child.schema,
+          depth:
+            child.relation === "nested" ? childDepth : frame.depth,
+        });
+      }
+
+      const reference = getOwn(node, "$ref");
+      if (typeof reference === "string") {
+        pending.push({
+          kind: "visit",
+          node: resolveLocalReference(root, reference),
+          depth: frame.depth,
+        });
       }
     }
   }
 
-  visitDefinitions(root);
+  const definitionRoots: unknown[] = [];
+  const visitedForDefinitions = new Set<JsonObject>();
+  const pendingDefinitions: unknown[] = [root];
+
+  while (pendingDefinitions.length > 0) {
+    const current = pendingDefinitions.pop();
+    if (
+      !isObject(current) ||
+      visitedForDefinitions.has(current)
+    ) {
+      continue;
+    }
+
+    visitedForDefinitions.add(current);
+
+    for (const child of getSchemaChildren(current)) {
+      pendingDefinitions.push(child.schema);
+      if (child.relation === "definition") {
+        definitionRoots.push(child.schema);
+      }
+    }
+  }
+
+  measureFrom(root);
+  for (const definitionRoot of definitionRoots) {
+    measureFrom(definitionRoot);
+  }
+
   return maxDepth;
 }
 
@@ -707,7 +957,7 @@ export function validateOpenAISchema(input: unknown): ValidationResult {
   const errors: SchemaDiagnostic[] = [];
   const warnings: SchemaDiagnostic[] = [];
 
-  if (objectSchema.type !== "object") {
+  if (getOwn(objectSchema, "type") !== "object") {
     errors.push(
       createDiagnostic(
         "error",
@@ -719,7 +969,7 @@ export function validateOpenAISchema(input: unknown): ValidationResult {
     );
   }
 
-  if ("anyOf" in objectSchema) {
+  if (hasOwn(objectSchema, "anyOf")) {
     errors.push(
       createDiagnostic(
         "error",
@@ -741,6 +991,10 @@ export function validateOpenAISchema(input: unknown): ValidationResult {
   visitSchema(fixedSchema, extracted.sourcePath, 0, traversalState);
   traversalState.stats.maxObjectDepth = computeMaxObjectDepth(fixedSchema);
   enforceGlobalLimits(traversalState, extracted.sourcePath);
+  const serializableFixedSchema =
+    traversalState.changed && canSerializeAsJson(fixedSchema)
+      ? fixedSchema
+      : null;
 
   return {
     ruleVersion: RULE_VERSION,
@@ -748,7 +1002,7 @@ export function validateOpenAISchema(input: unknown): ValidationResult {
     valid: errors.length === 0,
     errors,
     warnings,
-    fixedSchema: traversalState.changed ? fixedSchema : null,
+    fixedSchema: serializableFixedSchema,
     stats: traversalState.stats,
   };
 }

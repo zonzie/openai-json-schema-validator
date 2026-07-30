@@ -52,6 +52,31 @@ describe("validateOpenAISchema", () => {
     expect(second.stats.propertyCount).toBe(0);
   });
 
+  it("ignores schema keywords inherited from the object prototype", () => {
+    let result: ReturnType<typeof validateOpenAISchema>;
+
+    Object.defineProperty(Object.prototype, "allOf", {
+      configurable: true,
+      value: [],
+    });
+
+    try {
+      result = validateOpenAISchema(
+        JSON.stringify({
+          type: "object",
+          properties: {},
+          required: [],
+          additionalProperties: false,
+        }),
+      );
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).allOf;
+    }
+
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
   it("rejects a root schema that is not an object", () => {
     const result = validateOpenAISchema({
       type: "array",
@@ -144,6 +169,40 @@ describe("validateOpenAISchema", () => {
     expect(validateOpenAISchema(result.fixedSchema).valid).toBe(true);
   });
 
+  it("enforces strict object rules for nullable object schemas", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        payload: {
+          type: ["object", "null"],
+          additionalProperties: true,
+        },
+      },
+      required: ["payload"],
+      additionalProperties: false,
+    });
+
+    expect(result.stats.maxObjectDepth).toBe(2);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "additional_properties_must_be_false",
+        path: "$.properties.payload.additionalProperties",
+      }),
+    );
+    expect(result.fixedSchema).toEqual({
+      type: "object",
+      properties: {
+        payload: {
+          type: ["object", "null"],
+          additionalProperties: false,
+        },
+      },
+      required: ["payload"],
+      additionalProperties: false,
+    });
+    expect(validateOpenAISchema(result.fixedSchema).valid).toBe(true);
+  });
+
   it("removes required names that have no declared property", () => {
     const result = validateOpenAISchema({
       type: "object",
@@ -163,6 +222,51 @@ describe("validateOpenAISchema", () => {
       additionalProperties: false,
     });
     expect(validateOpenAISchema(result.fixedSchema).valid).toBe(true);
+  });
+
+  it("does not rewrite required names when properties is malformed", () => {
+    const input = {
+      type: "object",
+      properties: "not-an-object",
+      required: ["name"],
+      additionalProperties: false,
+    };
+
+    const result = validateOpenAISchema(input);
+
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "properties_must_be_object",
+        path: "$.properties",
+      }),
+    );
+    expect(result.errors).not.toContainEqual(
+      expect.objectContaining({
+        code: "required_property_not_declared",
+      }),
+    );
+    expect(result.fixedSchema).toBeNull();
+    expect(input.required).toEqual(["name"]);
+  });
+
+  it("rejects property entries that are not schema objects", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        bad: 42,
+      },
+      required: ["bad"],
+      additionalProperties: false,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "schema_must_be_object",
+        path: "$.properties.bad",
+      }),
+    );
+    expect(result.fixedSchema).toBeNull();
   });
 
   it("escapes user-defined names in diagnostic JSON paths", () => {
@@ -256,6 +360,24 @@ describe("validateOpenAISchema", () => {
     const result = validateOpenAISchema(schema);
 
     expect(result.stats.maxObjectDepth).toBe(11);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "object_nesting_too_deep",
+        path: "$",
+      }),
+    );
+  });
+
+  it("returns a depth diagnostic for deeply nested JSON without overflowing the stack", () => {
+    let schema = '{"type":"string"}';
+
+    for (let level = 0; level < 5_000; level += 1) {
+      schema = `{"type":"object","properties":{"child":${schema}},"required":["child"],"additionalProperties":false}`;
+    }
+
+    const result = validateOpenAISchema(schema);
+
+    expect(result.stats.maxObjectDepth).toBe(5_000);
     expect(result.errors).toContainEqual(
       expect.objectContaining({
         code: "object_nesting_too_deep",
@@ -430,6 +552,43 @@ describe("validateOpenAISchema", () => {
         }),
       ]),
     );
+  });
+
+  it("validates and counts schemas nested under patternProperties", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {},
+      patternProperties: {
+        "^item_": {
+          type: "object",
+          properties: {
+            value: { type: "string" },
+          },
+          required: [],
+        },
+      },
+      required: [],
+      additionalProperties: false,
+    });
+
+    expect(result.stats).toMatchObject({
+      propertyCount: 1,
+      maxObjectDepth: 2,
+    });
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "additional_properties_must_be_false",
+          path: '$.patternProperties["^item_"].additionalProperties',
+        }),
+        expect.objectContaining({
+          code: "property_must_be_required",
+          path: '$.patternProperties["^item_"].required',
+        }),
+      ]),
+    );
+    expect(result.fixedSchema).not.toBeNull();
+    expect(validateOpenAISchema(result.fixedSchema).valid).toBe(true);
   });
 
   it("rejects string formats outside the documented supported list", () => {
