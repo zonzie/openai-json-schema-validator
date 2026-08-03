@@ -2,13 +2,13 @@
 
 ## Purpose
 
-This repository ships a deterministic browser and HTTP preflight validator for
+This repository ships a deterministic browser-local preflight validator for
 the documented OpenAI Structured Outputs JSON Schema subset.
 
 ## Commands
 
 - `pnpm dev` — run the app locally.
-- `pnpm test` — run unit and API tests.
+- `pnpm test` — run unit tests.
 - `pnpm test:e2e` — run the Playwright browser test.
 - `pnpm typecheck` — run TypeScript without emitting files.
 - `pnpm lint` — run ESLint.
@@ -24,5 +24,7 @@ the documented OpenAI Structured Outputs JSON Schema subset.
   message, and documentation URL.
 - Auto-fixes must be conservative and covered by a behavior test.
 - Do not send or persist user schemas.
+- Do not expose a public validation HTTP endpoint until real demand is
+  validated and authentication, durable rate limiting, and quotas are defined.
 - Do not claim parity with undocumented OpenAI server behavior.
 - Use `apply_patch` for hand-authored edits.

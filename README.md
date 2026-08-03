@@ -1,7 +1,7 @@
 # OpenAI JSON Schema Validator
 
-A deterministic browser tool and HTTP API for checking JSON Schemas against
-the documented OpenAI Structured Outputs subset.
+A deterministic browser tool for checking JSON Schemas against the documented
+OpenAI Structured Outputs subset.
 
 The validator catches OpenAI-specific strict-mode requirements that a generic
 JSON Schema validator can miss, then shows a reviewable patch for the two
@@ -31,7 +31,7 @@ the [official Structured Outputs documentation][openai-docs].
 
 ## Input formats
 
-The public validator accepts:
+The browser validator accepts:
 
 - a bare JSON Schema
 - a descriptor with `schema`
@@ -73,39 +73,15 @@ pnpm dev
 
 Open `http://localhost:3000`.
 
-## HTTP API
+## Privacy and API availability
 
-`POST /api/validate`
+The interactive workbench imports the pure validator and runs entirely in the
+browser. Pasted schemas are not uploaded to this site.
 
-```bash
-curl -X POST http://localhost:3000/api/validate \
-  -H "content-type: application/json" \
-  -d '{
-    "schema": {
-      "type": "object",
-      "properties": {
-        "answer": { "type": "string" }
-      },
-      "required": ["answer"],
-      "additionalProperties": false
-    }
-  }'
-```
-
-The endpoint returns the same versioned `ValidationResult` used by the browser
-workbench. Responses use `Cache-Control: no-store`, and the server does not
-persist input. The web interface itself imports the pure validator and runs
-locally in the browser. Cross-origin browser access is not enabled by default;
-use the endpoint from the same origin, a server, CI, or your own proxy.
-
-The HTTP boundary accepts request bodies up to 1,000,000 bytes and keeps
-responses at or below 512,000 bytes. Core results retain at most 100 errors and
-50 warnings, cap diagnostic paths and text, and report how many additional
-findings were omitted. Reference-depth analysis also has a 50,000-operation
-budget. When only a large fixed schema would exceed the response budget, the
-API omits that field and returns `fixedSchemaOmitted: true`.
-If patch values also exceed the budget, the API preserves diagnostics and
-returns `patches: []` with `patchesOmitted: true`.
+The production site does not expose a public HTTP validation endpoint. If
+real API demand is demonstrated later, it should be introduced with
+authentication, durable rate limiting, quotas, and usage monitoring rather
+than as an anonymous endpoint.
 
 ## Verification
 
@@ -118,16 +94,16 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-Core and API tests exercise public interfaces. The Playwright test verifies the
-full paste → diagnose → review patch → apply flow, including stale-result and
-browser-size-limit behavior.
+Core tests exercise the public validator function. Playwright verifies the full
+paste → diagnose → review patch → apply flow, including stale-result and
+browser-size-limit behavior, and confirms that no public validation endpoint is
+exposed.
 
 ## Project structure
 
 ```text
 src/
   app/
-    api/validate/        HTTP API
     page.tsx             crawlable product page
   components/            interactive browser workbench
   lib/
@@ -148,8 +124,8 @@ rendered.
 Vercel Web Analytics records anonymous, cookie-free page views after it is
 enabled for the project. The three custom event helpers accept only fixed event
 names and a validation outcome enum; they cannot receive schema contents,
-pasted values, diagnostic paths, or API bodies. Custom-event reporting depends
-on the Vercel plan, while page-view reporting is available on all plans.
+pasted values, or diagnostic paths. Custom-event reporting depends on the
+Vercel plan, while page-view reporting is available on all plans.
 
 ## Scope and limitations
 

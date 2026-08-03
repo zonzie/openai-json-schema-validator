@@ -23,9 +23,7 @@ who wants to verify a schema before sending an OpenAI API request.
 
 1. `validateOpenAISchema(input)` accepts a JSON string or parsed value and
    returns a versioned validation result.
-2. `POST /api/validate` accepts `{ "schema": string | object }` and returns the
-   same validation result as JSON.
-3. The browser workflow lets a user paste, validate, inspect diagnostics,
+2. The browser workflow lets a user paste, validate, inspect diagnostics,
    review proposed patch operations, apply them, and copy the patched schema.
 
 Tests observe only these seams.
@@ -126,46 +124,16 @@ Diagnostic budgets:
   `reference_analysis_budget_exceeded` error instead of continuing an
   adversarial cyclic expansion.
 
-## API contract
+## Public API policy
 
-`POST /api/validate`
+The production site does not expose a validation HTTP endpoint. A request to
+the former `/api/validate` path must return HTTP 404. The browser imports the
+pure rule engine directly, so removing the endpoint does not change the primary
+workflow.
 
-Request:
-
-```json
-{
-  "schema": "{\"type\":\"object\",\"properties\":{}}"
-}
-```
-
-Success: HTTP 200 with a `ValidationResult`.
-
-Malformed request JSON or a missing `schema` field: HTTP 400 with:
-
-```json
-{
-  "error": {
-    "code": "invalid_request",
-    "message": "A schema string or object is required."
-  }
-}
-```
-
-Request bodies may be at most 1,000,000 bytes. Larger bodies return HTTP 413
-with the `payload_too_large` code.
-
-Validation responses may be at most 512,000 bytes. If a reviewable
-`fixedSchema` would exceed that budget, the API returns the diagnostics with
-`fixedSchema: null` and `fixedSchemaOmitted: true`. If the bounded result still
-cannot fit because patch values are also large, it additionally returns
-`patches: []` and `patchesOmitted: true` before discarding diagnostics. If that
-bounded result still cannot fit, the API returns HTTP 422 with the
-`validation_result_too_large` code.
-
-The API performs no network calls and persists no input.
-Every API response sends `Cache-Control: no-store`. Cross-origin browser access
-is not enabled; the endpoint is for same-origin, server, and CI callers unless
-the operator adds a proxy.
+An HTTP API may be reconsidered only after real demand is demonstrated. Before
+it is made public, its product contract must include authentication, durable
+rate limiting, quotas, abuse monitoring, and explicit privacy documentation.
 
 ## Interface direction
 
@@ -183,8 +151,8 @@ The page should feel like a precise engineering instrument:
 - Browser input is capped at 1,000,000 UTF-8 bytes before validation.
 - Vercel Web Analytics may record anonymous, cookie-free page views. Custom
   events are allowlisted to validation outcome, patch application, and patched
-  JSON copy actions; schema contents, pasted values, paths, and API bodies are
-  never event properties.
+  JSON copy actions; schema contents, pasted values, and paths are never event
+  properties.
 
 ## SEO requirements
 
@@ -208,14 +176,15 @@ The page should feel like a precise engineering instrument:
 - Resolved local reference targets receive the same structural validation as
   directly nested schemas.
 - Shared `$ref` graphs do not cause repeated exponential traversal.
-- Diagnostic, request, and response size budgets are enforced.
+- Browser input, diagnostic, and reference-analysis budgets are enforced.
 - All supported wrappers resolve to the same schema result, and all recognized
   schemas in a tools array are validated.
 - Patches preserve supported wrappers and are offered only when the repaired
   result passes every error rule.
 - Undeclared names, malformed arrays, and ambiguous `properties`/`required`
   mismatches are diagnosed without destructive rewriting.
-- The API mirrors the core result and rejects bad requests.
+- The production site returns HTTP 404 for the removed validation endpoint and
+  does not advertise a public API.
 - The primary browser workflow passes at desktop and narrow mobile widths.
 - Edited and oversized browser input cannot retain a stale passing result.
 - Typecheck, lint, unit tests, production build, and Playwright smoke test pass.

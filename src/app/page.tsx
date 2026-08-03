@@ -18,7 +18,7 @@ const faqs = [
   {
     question: "Does the validator send my schema to a server?",
     answer:
-      "The interactive workbench runs in your browser and does not upload the schema. The optional HTTP API is a separate server endpoint for callers who explicitly choose to use it.",
+      "No. The interactive workbench runs entirely in your browser. The production site does not expose a validation API, so pasted schemas are not sent to this site's server.",
   },
   {
     question: "Can it fix invalid schema for response_format errors?",
@@ -33,7 +33,7 @@ const faqs = [
   {
     question: "What usage data is measured?",
     answer:
-      "Vercel Web Analytics may record anonymous, cookie-free page views and named actions. Validation events contain only an outcome label; schema contents, pasted values, diagnostic paths, and API request bodies are never included.",
+      "Vercel Web Analytics may record anonymous, cookie-free page views and named actions. Validation events contain only an outcome label; schema contents, pasted values, and diagnostic paths are never included.",
   },
 ] as const;
 
@@ -60,7 +60,7 @@ const structuredData = [
       "Path-specific diagnostics",
       "Reviewable strict-mode patches",
       "Browser-local validation",
-      "HTTP validation API",
+      "No schema uploads",
     ],
   },
   {
@@ -136,7 +136,7 @@ export default function Home() {
         <nav aria-label="Primary navigation">
           <a href="#validator">Validator</a>
           <a href="#rules">Rule index</a>
-          <a href="#api">API</a>
+          <a href="#privacy">Privacy</a>
           <a
             href="https://github.com/zonzie/openai-json-schema-validator"
             target="_blank"
@@ -262,53 +262,51 @@ export default function Home() {
           </p>
         </section>
 
-        <section id="api" className={styles.apiSection}>
-          <div className={styles.apiCopy}>
-            <p className={styles.sectionLabel}>Backend interface</p>
-            <h2>One rule engine, two ways to use it.</h2>
+        <section id="privacy" className={styles.localSection}>
+          <div className={styles.localCopy}>
+            <p className={styles.sectionLabel}>Local execution</p>
+            <h2>Your schema stays on this device.</h2>
             <p>
-              The page validates locally. CI jobs and internal tools can call
-              the same versioned rules through the HTTP endpoint. The endpoint
-              is intended for server and CI use; browser calls are same-origin
-              unless you add your own proxy.
+              The workbench imports the deterministic rule engine directly into
+              your browser. Validation, diagnostics, and reviewed patches are
+              computed without uploading the pasted input to this site.
             </p>
-            <div className={styles.apiFacts}>
+            <p className={styles.localPolicy}>
+              No public validation API is exposed.
+            </p>
+            <div className={styles.localFacts}>
               <div>
-                <span>Method</span>
-                <strong>POST</strong>
+                <span>Execution</span>
+                <strong>Browser local</strong>
               </div>
               <div>
-                <span>Endpoint</span>
-                <strong>/api/validate</strong>
+                <span>Schema upload</span>
+                <strong>None</strong>
               </div>
               <div>
-                <span>Persistence</span>
-                <strong>No storage</strong>
+                <span>Account</span>
+                <strong>Not required</strong>
               </div>
               <div>
-                <span>Cache</span>
-                <strong>No-store</strong>
+                <span>Public API</span>
+                <strong>Not offered</strong>
               </div>
             </div>
           </div>
-          <div className={styles.apiCode}>
+          <div className={styles.localFlow}>
             <div>
-              <span>cURL</span>
-              <span>application/json</span>
+              <span>Execution path</span>
+              <span>Browser only</span>
             </div>
             <pre>
-              <code>{`curl -X POST ${SITE_URL}/api/validate \\
-  -H "content-type: application/json" \\
-  -d '{
-    "schema": {
-      "type": "object",
-      "properties": {
-        "answer": { "type": "string" }
-      },
-      "required": ["answer"],
-      "additionalProperties": false
-    }
-  }'`}</code>
+              <code>{`paste schema
+    ↓
+validateOpenAISchema(input)
+    ↓
+diagnostics + reviewable patch
+
+network upload     none
+server validation  none`}</code>
             </pre>
           </div>
         </section>

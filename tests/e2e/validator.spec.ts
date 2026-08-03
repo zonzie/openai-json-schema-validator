@@ -152,6 +152,40 @@ test("keeps the validator close to the first mobile viewport", async ({
   expect(box?.y).toBeLessThan(900);
 });
 
+test("does not expose a public validation API", async ({
+  request,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium");
+
+  const response = await request.post("/api/validate", {
+    data: {
+      schema: {
+        type: "object",
+        properties: {},
+        required: [],
+        additionalProperties: false,
+      },
+    },
+  });
+
+  expect(response.status()).toBe(404);
+});
+
+test("explains local-only validation without advertising an API", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium");
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("heading", { name: "Your schema stays on this device." }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("No public validation API is exposed.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("/api/validate");
+});
+
 test("publishes crawlable canonical, structured data, robots, and sitemap", async ({
   page,
   request,

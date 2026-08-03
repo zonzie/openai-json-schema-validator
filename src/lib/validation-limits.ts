@@ -1,2 +1,1 @@
 export const MAX_INPUT_BYTES = 1_000_000;
-export const MAX_RESPONSE_BODY_BYTES = 512_000;
