@@ -1,4 +1,4 @@
-export const RULE_VERSION = "2026-07-30" as const;
+export const RULE_VERSION = "2026-08-03" as const;
 
 export const OPENAI_SCHEMA_DOCS_URL =
   "https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas";
@@ -21,10 +21,17 @@ export type SchemaDiagnostic = {
 };
 
 export type SchemaStats = {
+  schemaCount: number;
   propertyCount: number;
   maxObjectDepth: number;
   totalStringLength: number;
   enumValueCount: number;
+};
+
+export type SchemaPatch = {
+  operation: "add" | "replace";
+  path: string;
+  value: unknown;
 };
 
 export type ValidationResult = {
@@ -35,6 +42,7 @@ export type ValidationResult = {
   warnings: SchemaDiagnostic[];
   omittedDiagnosticCount: number;
   fixedSchema: unknown | null;
+  patches: SchemaPatch[];
   stats: SchemaStats;
 };
 
@@ -114,7 +122,23 @@ const SUPPORTED_TYPES = new Set([
   "null",
 ]);
 
+const NUMERIC_KEYWORDS = [
+  "maximum",
+  "exclusiveMaximum",
+  "minimum",
+  "exclusiveMinimum",
+  "multipleOf",
+] as const;
+
+const NON_NEGATIVE_INTEGER_KEYWORDS = [
+  "minItems",
+  "maxItems",
+  "minLength",
+  "maxLength",
+] as const;
+
 const EMPTY_STATS: SchemaStats = {
+  schemaCount: 0,
   propertyCount: 0,
   maxObjectDepth: 0,
   totalStringLength: 0,
@@ -130,6 +154,45 @@ function isStringArray(value: unknown): value is string[] {
     Array.isArray(value) &&
     value.every((item): item is string => typeof item === "string")
   );
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function describeValue(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return "<unprintable value>";
+  }
+}
+
+function describeTypeValue(value: unknown): string {
+  return Array.isArray(value)
+    ? value.map((item) => describeValue(item)).join(", ")
+    : describeValue(value);
+}
+
+function hasDuplicateJsonValues(values: unknown[]): boolean {
+  const serializedValues = new Set<string>();
+
+  for (const value of values) {
+    let serializedValue: string;
+
+    try {
+      serializedValue = JSON.stringify(value) ?? String(value);
+    } catch {
+      continue;
+    }
+
+    if (serializedValues.has(serializedValue)) {
+      return true;
+    }
+    serializedValues.add(serializedValue);
+  }
+
+  return false;
 }
 
 function hasOwn(node: JsonObject, key: string): boolean {
@@ -374,23 +437,25 @@ function hasBareSchemaRootSignals(input: JsonObject): boolean {
   return false;
 }
 
-function extractSchema(input: unknown): ExtractedSchema {
+function extractSchemas(input: unknown): ExtractedSchema[] {
   if (!isObject(input)) {
-    return { schema: input, sourcePath: "$" };
+    return [{ schema: input, sourcePath: "$" }];
   }
 
   if (hasBareSchemaRootSignals(input)) {
-    return { schema: input, sourcePath: "$" };
+    return [{ schema: input, sourcePath: "$" }];
   }
 
   const responseFormat = getOwn(input, "response_format");
   if (isObject(responseFormat)) {
     const jsonSchema = getOwn(responseFormat, "json_schema");
     if (isObject(jsonSchema) && hasOwn(jsonSchema, "schema")) {
-      return {
-        schema: getOwn(jsonSchema, "schema"),
-        sourcePath: "$.response_format.json_schema.schema",
-      };
+      return [
+        {
+          schema: getOwn(jsonSchema, "schema"),
+          sourcePath: "$.response_format.json_schema.schema",
+        },
+      ];
     }
   }
 
@@ -398,15 +463,19 @@ function extractSchema(input: unknown): ExtractedSchema {
   if (isObject(text)) {
     const format = getOwn(text, "format");
     if (isObject(format) && hasOwn(format, "schema")) {
-      return {
-        schema: getOwn(format, "schema"),
-        sourcePath: "$.text.format.schema",
-      };
+      return [
+        {
+          schema: getOwn(format, "schema"),
+          sourcePath: "$.text.format.schema",
+        },
+      ];
     }
   }
 
   const tools = getOwn(input, "tools");
   if (Array.isArray(tools)) {
+    const toolSchemas: ExtractedSchema[] = [];
+
     for (const [index, tool] of tools.entries()) {
       if (!isObject(tool)) {
         continue;
@@ -414,36 +483,43 @@ function extractSchema(input: unknown): ExtractedSchema {
 
       const toolFunction = getOwn(tool, "function");
       if (isObject(toolFunction) && hasOwn(toolFunction, "parameters")) {
-        return {
+        toolSchemas.push({
           schema: getOwn(toolFunction, "parameters"),
           sourcePath: `$.tools[${index}].function.parameters`,
-        };
+        });
+        continue;
       }
 
       if (
         getOwn(tool, "type") === "function" &&
         hasOwn(tool, "parameters")
       ) {
-        return {
+        toolSchemas.push({
           schema: getOwn(tool, "parameters"),
           sourcePath: `$.tools[${index}].parameters`,
-        };
+        });
       }
+    }
+
+    if (toolSchemas.length > 0) {
+      return toolSchemas;
     }
   }
 
   if (!declaresType(input, "object") && hasOwn(input, "schema")) {
-    return { schema: getOwn(input, "schema"), sourcePath: "$.schema" };
+    return [{ schema: getOwn(input, "schema"), sourcePath: "$.schema" }];
   }
 
   if (!declaresType(input, "object") && hasOwn(input, "parameters")) {
-    return {
-      schema: getOwn(input, "parameters"),
-      sourcePath: "$.parameters",
-    };
+    return [
+      {
+        schema: getOwn(input, "parameters"),
+        sourcePath: "$.parameters",
+      },
+    ];
   }
 
-  return { schema: input, sourcePath: "$" };
+  return [{ schema: input, sourcePath: "$" }];
 }
 
 type TraversalState = {
@@ -452,6 +528,7 @@ type TraversalState = {
   omittedDiagnosticCount: number;
   stats: SchemaStats;
   changed: boolean;
+  patches: SchemaPatch[];
 };
 
 type SchemaChild =
@@ -670,9 +747,95 @@ function visitSchema(
           "unsupported_type",
           extendSchemaPath(path, "type"),
           () =>
-            `"${Array.isArray(typeValue) ? typeValue.join(", ") : String(typeValue)}" contains a type outside the documented Structured Outputs set.`,
+            `"${describeTypeValue(typeValue)}" contains a type outside the documented Structured Outputs set.`,
           `Use one or more of: ${Array.from(SUPPORTED_TYPES).join(", ")}.`,
         );
+      }
+
+      if (
+        Array.isArray(typeValue) &&
+        new Set(typeValue).size !== typeValue.length
+      ) {
+        addDiagnostic(
+          state,
+          "error",
+          "type_values_must_be_unique",
+          extendSchemaPath(path, "type"),
+          'Every value in a "type" array must be unique.',
+          "Remove duplicate type names.",
+        );
+      }
+    }
+
+    for (const keyword of NUMERIC_KEYWORDS) {
+      if (!hasOwn(node, keyword)) {
+        continue;
+      }
+
+      const value = getOwn(node, keyword);
+      if (!isFiniteNumber(value)) {
+        addDiagnostic(
+          state,
+          "error",
+          "numeric_keyword_must_be_number",
+          extendSchemaPath(path, keyword),
+          `"${keyword}" must be a finite JSON number.`,
+          `Replace "${keyword}" with a finite number.`,
+        );
+      } else if (keyword === "multipleOf" && value <= 0) {
+        addDiagnostic(
+          state,
+          "error",
+          "multiple_of_must_be_positive",
+          extendSchemaPath(path, keyword),
+          '"multipleOf" must be greater than zero.',
+          'Replace "multipleOf" with a positive number.',
+        );
+      }
+    }
+
+    for (const keyword of NON_NEGATIVE_INTEGER_KEYWORDS) {
+      if (!hasOwn(node, keyword)) {
+        continue;
+      }
+
+      const value = getOwn(node, keyword);
+      if (!Number.isInteger(value) || (value as number) < 0) {
+        addDiagnostic(
+          state,
+          "error",
+          "size_keyword_must_be_non_negative_integer",
+          extendSchemaPath(path, keyword),
+          `"${keyword}" must be a non-negative integer.`,
+          `Replace "${keyword}" with zero or a positive integer.`,
+        );
+      }
+    }
+
+    const patternValue = getOwn(node, "pattern");
+    if (hasOwn(node, "pattern")) {
+      if (typeof patternValue !== "string") {
+        addDiagnostic(
+          state,
+          "error",
+          "pattern_must_be_string",
+          extendSchemaPath(path, "pattern"),
+          '"pattern" must be a string containing a regular expression.',
+          'Replace "pattern" with a string.',
+        );
+      } else {
+        try {
+          new RegExp(patternValue);
+        } catch {
+          addDiagnostic(
+            state,
+            "warning",
+            "invalid_pattern_syntax",
+            extendSchemaPath(path, "pattern"),
+            "This regular expression cannot be compiled by the browser runtime.",
+            "Review the pattern for syntax errors and API-runtime compatibility.",
+          );
+        }
       }
     }
 
@@ -730,6 +893,16 @@ function visitSchema(
             `The local reference "${referenceValue}" does not resolve to a schema object.`,
           "Point this reference at an existing local schema definition.",
         );
+      } else if (!referenceValue.startsWith("#")) {
+        addDiagnostic(
+          state,
+          "warning",
+          "external_ref_not_resolved",
+          extendSchemaPath(path, "$ref"),
+          () =>
+            `The external reference "${referenceValue}" was not resolved by this browser-local validator.`,
+          "Inline the referenced schema or verify this reference with the target API.",
+        );
       }
     }
 
@@ -781,14 +954,23 @@ function visitSchema(
         !hasOwn(node, "additionalProperties") ||
         node.additionalProperties !== false
       ) {
+        const additionalPropertiesPath = extendSchemaPath(
+          path,
+          "additionalProperties",
+        );
         addDiagnostic(
           state,
           "error",
           "additional_properties_must_be_false",
-          extendSchemaPath(path, "additionalProperties"),
+          additionalPropertiesPath,
           'Every object schema must set "additionalProperties" to false.',
           'Set "additionalProperties": false on this object.',
         );
+        state.patches.push({
+          operation: hasOwn(node, "additionalProperties") ? "replace" : "add",
+          path: formatSchemaPath(additionalPropertiesPath),
+          value: false,
+        });
         node.additionalProperties = false;
         state.changed = true;
       }
@@ -810,6 +992,9 @@ function visitSchema(
         : [];
       const propertyNameSet = new Set(propertyNames);
       const declaredRequiredSet = new Set(declaredRequired);
+      const hasDuplicateRequiredNames =
+        requiredIsStringArray &&
+        declaredRequiredSet.size !== declaredRequired.length;
       const undeclaredRequired = hasMalformedProperties
         ? []
         : declaredRequired.filter(
@@ -820,15 +1005,12 @@ function visitSchema(
         : propertyNames.filter(
             (propertyName) => !declaredRequiredSet.has(propertyName),
           );
-      const hasAmbiguousRequiredMismatch =
-        undeclaredRequired.length > 0 && missingRequired.length > 0;
-      const fixedRequired = hasMalformedProperties
-        ? [...declaredRequired]
-        : hasAmbiguousRequiredMismatch
-          ? [...declaredRequired]
-          : declaredRequired.filter((propertyName) =>
-              propertyNameSet.has(propertyName),
-            );
+      const canPatchRequired =
+        !hasMalformedProperties &&
+        (!hasOwn(node, "required") || requiredIsStringArray) &&
+        !hasDuplicateRequiredNames &&
+        undeclaredRequired.length === 0;
+      const fixedRequired = [...declaredRequired];
       let requiredChanged = false;
 
       if (hasOwn(node, "required") && !requiredIsStringArray) {
@@ -840,7 +1022,17 @@ function visitSchema(
           '"required" must be an array of property-name strings.',
           'Replace "required" with an array containing declared property names.',
         );
-        requiredChanged = !hasMalformedProperties;
+      }
+
+      if (hasDuplicateRequiredNames) {
+        addDiagnostic(
+          state,
+          "error",
+          "required_values_must_be_unique",
+          extendSchemaPath(path, "required"),
+          'Every property name in "required" must be unique.',
+          'Remove duplicate names from "required".',
+        );
       }
 
       if (!hasMalformedProperties) {
@@ -855,9 +1047,6 @@ function visitSchema(
             () =>
               `Remove "${propertyName}" from "required" or declare the property.`,
           );
-          if (!hasAmbiguousRequiredMismatch) {
-            requiredChanged = true;
-          }
         }
 
         for (const propertyName of missingRequired) {
@@ -870,7 +1059,7 @@ function visitSchema(
               `"${propertyName}" is declared in "properties" but missing from "required".`,
             () => `Add "${propertyName}" to "required".`,
           );
-          if (!hasAmbiguousRequiredMismatch) {
+          if (canPatchRequired) {
             fixedRequired.push(propertyName);
             requiredChanged = true;
           }
@@ -878,6 +1067,11 @@ function visitSchema(
       }
 
       if (requiredChanged) {
+        state.patches.push({
+          operation: hasOwn(node, "required") ? "replace" : "add",
+          path: formatSchemaPath(extendSchemaPath(path, "required")),
+          value: [...fixedRequired],
+        });
         node.required = fixedRequired;
         state.changed = true;
       }
@@ -896,6 +1090,28 @@ function visitSchema(
     }
 
     if (Array.isArray(enumValue)) {
+      if (enumValue.length === 0) {
+        addDiagnostic(
+          state,
+          "warning",
+          "empty_enum",
+          extendSchemaPath(path, "enum"),
+          'An empty "enum" cannot match any JSON value.',
+          "Add at least one allowed value or remove the keyword.",
+        );
+      }
+
+      if (hasDuplicateJsonValues(enumValue)) {
+        addDiagnostic(
+          state,
+          "warning",
+          "duplicate_enum_value",
+          extendSchemaPath(path, "enum"),
+          'The "enum" contains duplicate JSON values.',
+          "Remove duplicate enum values.",
+        );
+      }
+
       state.stats.enumValueCount += enumValue.length;
       const enumStringLength = enumValue.reduce(
         (total: number, value: unknown) =>
@@ -1288,14 +1504,16 @@ function validateOpenAISchemaInternal(
         warnings: [],
         omittedDiagnosticCount: 0,
         fixedSchema: null,
+        patches: [],
         stats: { ...EMPTY_STATS },
       };
     }
   }
 
   const fixedInput = cloneJson(schema);
-  const extracted = extractSchema(fixedInput);
-  const objectSchema = isObject(extracted.schema) ? extracted.schema : {};
+  const extractedSchemas = extractSchemas(fixedInput);
+  const sourcePath =
+    extractedSchemas.length === 1 ? extractedSchemas[0].sourcePath : "$.tools";
   const errors: SchemaDiagnostic[] = [];
   const warnings: SchemaDiagnostic[] = [];
   const traversalState: TraversalState = {
@@ -1304,46 +1522,74 @@ function validateOpenAISchemaInternal(
     omittedDiagnosticCount: 0,
     stats: { ...EMPTY_STATS },
     changed: false,
+    patches: [],
   };
 
-  if (getOwn(objectSchema, "type") !== "object") {
-    addDiagnostic(
-      traversalState,
-      "error",
-      "root_must_be_object",
-      appendPath(extracted.sourcePath, "type"),
-      'The root schema must set "type" to "object".',
-      'Wrap the schema in an object and set "type": "object".',
+  for (const extracted of extractedSchemas) {
+    const objectSchema = isObject(extracted.schema) ? extracted.schema : {};
+    const schemaState: TraversalState = {
+      errors,
+      warnings,
+      omittedDiagnosticCount: traversalState.omittedDiagnosticCount,
+      stats: { ...EMPTY_STATS, schemaCount: 1 },
+      changed: false,
+      patches: [],
+    };
+
+    if (getOwn(objectSchema, "type") !== "object") {
+      addDiagnostic(
+        schemaState,
+        "error",
+        "root_must_be_object",
+        appendPath(extracted.sourcePath, "type"),
+        'The root schema must set "type" to "object".',
+        'Wrap the schema in an object and set "type": "object".',
+      );
+    }
+
+    if (hasOwn(objectSchema, "anyOf")) {
+      addDiagnostic(
+        schemaState,
+        "error",
+        "root_any_of",
+        appendPath(extracted.sourcePath, "anyOf"),
+        'The root schema cannot use "anyOf".',
+        'Move the union into a property and keep the root "type" as "object".',
+      );
+    }
+
+    visitSchema(objectSchema, extracted.sourcePath, 0, schemaState);
+    const objectDepthAnalysis = computeMaxObjectDepth(objectSchema);
+    schemaState.stats.maxObjectDepth = Math.max(
+      schemaState.stats.maxObjectDepth,
+      objectDepthAnalysis.maxDepth,
     );
+    if (objectDepthAnalysis.operationBudgetExceeded) {
+      addPriorityError(
+        schemaState,
+        "reference_analysis_budget_exceeded",
+        extracted.sourcePath,
+        `The reference graph exceeded the ${MAX_REFERENCE_DEPTH_OPERATIONS.toLocaleString("en-US")}-operation depth-analysis budget.`,
+        "Reduce repeated cyclic reference branches or split the schema.",
+      );
+    }
+    enforceGlobalLimits(schemaState, extracted.sourcePath);
+
+    traversalState.omittedDiagnosticCount =
+      schemaState.omittedDiagnosticCount;
+    traversalState.changed ||= schemaState.changed;
+    traversalState.patches.push(...schemaState.patches);
+    traversalState.stats.schemaCount += schemaState.stats.schemaCount;
+    traversalState.stats.propertyCount += schemaState.stats.propertyCount;
+    traversalState.stats.maxObjectDepth = Math.max(
+      traversalState.stats.maxObjectDepth,
+      schemaState.stats.maxObjectDepth,
+    );
+    traversalState.stats.totalStringLength +=
+      schemaState.stats.totalStringLength;
+    traversalState.stats.enumValueCount += schemaState.stats.enumValueCount;
   }
 
-  if (hasOwn(objectSchema, "anyOf")) {
-    addDiagnostic(
-      traversalState,
-      "error",
-      "root_any_of",
-      appendPath(extracted.sourcePath, "anyOf"),
-      'The root schema cannot use "anyOf".',
-      'Move the union into a property and keep the root "type" as "object".',
-    );
-  }
-
-  visitSchema(objectSchema, extracted.sourcePath, 0, traversalState);
-  const objectDepthAnalysis = computeMaxObjectDepth(objectSchema);
-  traversalState.stats.maxObjectDepth = Math.max(
-    traversalState.stats.maxObjectDepth,
-    objectDepthAnalysis.maxDepth,
-  );
-  if (objectDepthAnalysis.operationBudgetExceeded) {
-    addPriorityError(
-      traversalState,
-      "reference_analysis_budget_exceeded",
-      extracted.sourcePath,
-      `The reference graph exceeded the ${MAX_REFERENCE_DEPTH_OPERATIONS.toLocaleString("en-US")}-operation depth-analysis budget.`,
-      "Reduce repeated cyclic reference branches or split the schema.",
-    );
-  }
-  enforceGlobalLimits(traversalState, extracted.sourcePath);
   let serializableFixedSchema: unknown | null = null;
 
   if (
@@ -1357,12 +1603,14 @@ function validateOpenAISchemaInternal(
 
   return {
     ruleVersion: RULE_VERSION,
-    sourcePath: extracted.sourcePath,
+    sourcePath,
     valid: errors.length === 0,
     errors,
     warnings,
     omittedDiagnosticCount: traversalState.omittedDiagnosticCount,
     fixedSchema: serializableFixedSchema,
+    patches:
+      serializableFixedSchema === null ? [] : traversalState.patches,
     stats: traversalState.stats,
   };
 }

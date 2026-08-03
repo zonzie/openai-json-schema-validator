@@ -1,7 +1,7 @@
 {
   "name": "openai-json-schema-validator",
   "version": "0.1.0",
-  "description": "Validate and safely repair JSON Schemas for OpenAI Structured Outputs.",
+  "description": "Validate JSON Schemas for OpenAI Structured Outputs and review strict-mode patches.",
   "private": true,
   "license": "MIT",
   "repository": {
@@ -9,7 +9,7 @@
     "url": "git+https://github.com/zonzie/openai-json-schema-validator.git"
   },
   "engines": {
-    "node": ">=22"
+    "node": "22.x"
   },
   "packageManager": "pnpm@11.9.0",
   "scripts": {
@@ -23,6 +23,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@vercel/analytics": "2.0.1",
     "next": "16.2.12",
     "react": "19.2.4",
     "react-dom": "19.2.4"

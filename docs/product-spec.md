@@ -1,14 +1,14 @@
 # OpenAI JSON Schema Validator — Product Specification
 
 Status: implementation-ready
-Rule source checked: 2026-07-30
+Rule source checked: 2026-08-03
 Canonical source: https://developers.openai.com/api/docs/guides/structured-outputs#supported-schemas
 Function tool shape source: https://developers.openai.com/api/docs/guides/function-calling#defining-functions
 
 ## Product promise
 
 Paste a JSON Schema or an OpenAI request wrapper and receive deterministic,
-path-specific diagnostics plus a conservative auto-fix for the documented
+path-specific diagnostics plus a reviewable strict-mode patch for the documented
 OpenAI Structured Outputs subset.
 
 The product is a preflight validator. It does not call the OpenAI API and does
@@ -26,7 +26,7 @@ who wants to verify a schema before sending an OpenAI API request.
 2. `POST /api/validate` accepts `{ "schema": string | object }` and returns the
    same validation result as JSON.
 3. The browser workflow lets a user paste, validate, inspect diagnostics,
-   apply safe fixes, and copy the fixed schema.
+   review proposed patch operations, apply them, and copy the patched schema.
 
 Tests observe only these seams.
 
@@ -41,8 +41,12 @@ Tests observe only these seams.
 - A Responses API request containing a flat function tool at
   `tools[].parameters`.
 
-The validator extracts and validates the first recognized schema and reports
-where it was found. `type: "json_schema"` and `type: "function"` are recognized
+The validator extracts recognized schemas and reports where they were found.
+For a `tools` request, it validates every recognized function schema and uses
+`$.tools` as the aggregate result path while keeping every diagnostic path
+specific. Returned statistics include the schema count and combined scan
+totals; hard limits are evaluated independently at each schema path.
+`type: "json_schema"` and `type: "function"` are recognized
 wrapper discriminators; any other top-level `type`, a `$`-prefixed schema
 marker, or another structural schema keyword takes precedence as a bare schema
 so an unknown annotation cannot be mistaken for a request wrapper.
@@ -60,6 +64,12 @@ Errors:
 - `items` must be a single schema object.
 - `anyOf` must be a non-empty array whose entries are schema objects.
 - `enum` must be an array.
+- Values in `type` and `required` arrays must be unique.
+- Numeric constraints must contain finite numbers, and `multipleOf` must be
+  greater than zero.
+- `minItems`, `maxItems`, `minLength`, and `maxLength` must be non-negative
+  integers.
+- `pattern` must be a string.
 - `$ref` must be a string, and local references must resolve to schema objects.
 - Every object must set `additionalProperties: false`.
 - Every key in an object's `properties` must appear in its `required` array.
@@ -84,20 +94,23 @@ Warnings:
   as errors.
 - Fine-tuned models have narrower support for selected constraints; using one
   produces a warning.
+- External references are not resolved locally and produce a warning.
+- Empty or duplicate enums and regular expressions that cannot be compiled by
+  the browser runtime produce review warnings.
 
-Safe auto-fixes:
+Reviewable strict-mode patches:
 
-- Add missing `required` entries when there are no simultaneous undeclared
-  required names.
-- Remove unknown names from `required` when there are no simultaneous
-  declared-but-not-required properties.
+- Add missing `required` entries only when `required` is absent or a valid,
+  unique string array and contains no undeclared names.
 - Set `additionalProperties` to `false` on object schemas.
 - Preserve the complete recognized request wrapper around the repaired schema.
+- Return each proposed `add` or `replace` operation with its path and value.
 
-Auto-fix does not rewrite root types, composition, limits, references, enums,
-or unknown keywords. It does not guess between the two sides of a likely
-property-name typo. A fixed candidate is exposed only after a second validation
-pass confirms that it has no remaining errors.
+The patch does not delete `required` names or rewrite malformed `required`
+arrays, root types, composition, limits, references, enums, or unknown
+keywords. It does not guess between the two sides of a likely property-name
+typo. A patched candidate is exposed only after a second validation pass
+confirms that it has no remaining errors.
 
 Diagnostic budgets:
 
@@ -141,13 +154,18 @@ Malformed request JSON or a missing `schema` field: HTTP 400 with:
 Request bodies may be at most 1,000,000 bytes. Larger bodies return HTTP 413
 with the `payload_too_large` code.
 
-Validation responses may be at most 512,000 bytes. If a conservative
+Validation responses may be at most 512,000 bytes. If a reviewable
 `fixedSchema` would exceed that budget, the API returns the diagnostics with
 `fixedSchema: null` and `fixedSchemaOmitted: true`. If the bounded result still
-cannot fit, the API returns HTTP 422 with the
+cannot fit because patch values are also large, it additionally returns
+`patches: []` and `patchesOmitted: true` before discarding diagnostics. If that
+bounded result still cannot fit, the API returns HTTP 422 with the
 `validation_result_too_large` code.
 
 The API performs no network calls and persists no input.
+Every API response sends `Cache-Control: no-store`. Cross-origin browser access
+is not enabled; the endpoint is for same-origin, server, and CI callers unless
+the operator adds a proxy.
 
 ## Interface direction
 
@@ -160,6 +178,13 @@ The page should feel like a precise engineering instrument:
 - distinctive editorial display typography paired with a code-focused
   monospace face;
 - no generic AI gradients, chat metaphors, or decorative dashboard cards.
+- Edits immediately replace prior diagnostics with an out-of-date state; the
+  interface never displays old statistics or a prior green result as current.
+- Browser input is capped at 1,000,000 UTF-8 bytes before validation.
+- Vercel Web Analytics may record anonymous, cookie-free page views. Custom
+  events are allowlisted to validation outcome, patch application, and patched
+  JSON copy actions; schema contents, pasted values, paths, and API bodies are
+  never event properties.
 
 ## SEO requirements
 
@@ -176,7 +201,7 @@ The page should feel like a precise engineering instrument:
 
 - A known-valid schema returns no errors.
 - Missing `required` and `additionalProperties: false` are both caught and
-  safely fixed.
+  included in a reviewable patch.
 - Nested object paths are precise.
 - Limits and unsupported composition rules are enforced.
 - Malformed supported-keyword values and broken local references are rejected.
@@ -184,11 +209,13 @@ The page should feel like a precise engineering instrument:
   directly nested schemas.
 - Shared `$ref` graphs do not cause repeated exponential traversal.
 - Diagnostic, request, and response size budgets are enforced.
-- All supported wrappers resolve to the same schema result.
-- Safe fixes preserve supported wrappers and are offered only when the repaired
+- All supported wrappers resolve to the same schema result, and all recognized
+  schemas in a tools array are validated.
+- Patches preserve supported wrappers and are offered only when the repaired
   result passes every error rule.
-- Ambiguous `properties` and `required` name mismatches are diagnosed without
-  automatic rewriting.
+- Undeclared names, malformed arrays, and ambiguous `properties`/`required`
+  mismatches are diagnosed without destructive rewriting.
 - The API mirrors the core result and rejects bad requests.
 - The primary browser workflow passes at desktop and narrow mobile widths.
+- Edited and oversized browser input cannot retain a stale passing result.
 - Typecheck, lint, unit tests, production build, and Playwright smoke test pass.

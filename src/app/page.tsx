@@ -1,8 +1,11 @@
+import Link from "next/link";
+
 import { ValidatorWorkbench } from "@/components/validator-workbench";
 import {
   OPENAI_SCHEMA_DOCS_URL,
   RULE_VERSION,
 } from "@/lib/openai-schema-validator/validator";
+import { SITE_URL } from "@/lib/site";
 
 import styles from "./page.module.css";
 
@@ -20,12 +23,17 @@ const faqs = [
   {
     question: "Can it fix invalid schema for response_format errors?",
     answer:
-      "It can safely repair common strict-mode problems: missing required entries, undeclared names inside required, and object schemas that do not set additionalProperties to false. Other changes remain manual.",
+      "It proposes a reviewable patch for missing required entries and object schemas that do not set additionalProperties to false. It never removes undeclared required names; ambiguous changes remain manual.",
   },
   {
     question: "Is a passing result guaranteed to work with every OpenAI model?",
     answer:
       "No. This is a preflight against public documentation, not a clone of the OpenAI API validator. Always test the final request with the exact API surface and model you will use.",
+  },
+  {
+    question: "What usage data is measured?",
+    answer:
+      "Vercel Web Analytics may record anonymous, cookie-free page views and named actions. Validation events contain only an outcome label; schema contents, pasted values, diagnostic paths, and API request bodies are never included.",
   },
 ] as const;
 
@@ -38,7 +46,10 @@ const structuredData = [
     operatingSystem: "Any",
     browserRequirements: "Requires JavaScript",
     description:
-      "Validate and safely repair JSON Schemas for OpenAI Structured Outputs.",
+      "Validate JSON Schemas for OpenAI Structured Outputs and review strict-mode patches.",
+    url: SITE_URL,
+    softwareVersion: RULE_VERSION,
+    isAccessibleForFree: true,
     offers: {
       "@type": "Offer",
       price: "0",
@@ -47,7 +58,7 @@ const structuredData = [
     featureList: [
       "OpenAI Structured Outputs preflight",
       "Path-specific diagnostics",
-      "Conservative schema auto-fix",
+      "Reviewable strict-mode patches",
       "Browser-local validation",
       "HTTP validation API",
     ],
@@ -110,7 +121,10 @@ export default function Home() {
       />
 
       <header className={styles.siteHeader}>
-        <a className={styles.brand} href="#" aria-label="Schema Signal home">
+        <Link
+          className={styles.brand}
+          href="/"
+        >
           <span className={styles.brandMark} aria-hidden="true">
             {"{✓}"}
           </span>
@@ -118,7 +132,7 @@ export default function Home() {
             Schema Signal
             <small>OpenAI preflight</small>
           </span>
-        </a>
+        </Link>
         <nav aria-label="Primary navigation">
           <a href="#validator">Validator</a>
           <a href="#rules">Rule index</a>
@@ -150,8 +164,8 @@ export default function Home() {
                 Use this OpenAI Structured Output validator to investigate an
                 OpenAI Structured Output validation error—including “invalid
                 schema for response_format”—before sending a request. Paste a
-                bare schema or wrapper, get exact paths, and safely repair
-                common strict-mode mistakes.
+                bare schema or complete tools wrapper, get exact paths, and
+                review a narrow patch for common strict-mode mistakes.
               </p>
               <div className={styles.heroActions}>
                 <a className={styles.primaryLink} href="#validator">
@@ -209,7 +223,7 @@ export default function Home() {
                 </div>
               </div>
               <div className={styles.specimenStamp}>
-                <span>Safe fix</span>
+                <span>Review patch</span>
                 <strong>available</strong>
               </div>
             </div>
@@ -254,7 +268,9 @@ export default function Home() {
             <h2>One rule engine, two ways to use it.</h2>
             <p>
               The page validates locally. CI jobs and internal tools can call
-              the same versioned rules through the HTTP endpoint.
+              the same versioned rules through the HTTP endpoint. The endpoint
+              is intended for server and CI use; browser calls are same-origin
+              unless you add your own proxy.
             </p>
             <div className={styles.apiFacts}>
               <div>
@@ -267,7 +283,11 @@ export default function Home() {
               </div>
               <div>
                 <span>Persistence</span>
-                <strong>None</strong>
+                <strong>No storage</strong>
+              </div>
+              <div>
+                <span>Cache</span>
+                <strong>No-store</strong>
               </div>
             </div>
           </div>
@@ -277,7 +297,7 @@ export default function Home() {
               <span>application/json</span>
             </div>
             <pre>
-              <code>{`curl -X POST https://your-host/api/validate \\
+              <code>{`curl -X POST ${SITE_URL}/api/validate \\
   -H "content-type: application/json" \\
   -d '{
     "schema": {

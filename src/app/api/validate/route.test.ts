@@ -24,10 +24,11 @@ describe("POST /api/validate", () => {
 
     expect(response.status).toBe(200);
     expect(body).toMatchObject({
-      ruleVersion: "2026-07-30",
+      ruleVersion: "2026-08-03",
       valid: true,
       errors: [],
     });
+    expect(response.headers.get("cache-control")).toBe("no-store");
   });
 
   it("returns a limit diagnostic for deeply nested schema JSON", async () => {
@@ -105,6 +106,56 @@ describe("POST /api/validate", () => {
     expect(body.fixedSchemaOmitted).toBe(true);
   });
 
+  it("omits oversized patch details before discarding bounded diagnostics", async () => {
+    const tools = Array.from({ length: 5 }, (_, toolIndex) => {
+      const propertyNames = Array.from(
+        { length: 1_000 },
+        (_, propertyIndex) =>
+          `tool_${toolIndex}_${propertyIndex}_${"x".repeat(82)}`,
+      );
+
+      return {
+        type: "function",
+        parameters: {
+          type: "object",
+          properties: Object.fromEntries(
+            propertyNames.map((propertyName) => [
+              propertyName,
+              { type: "string" },
+            ]),
+          ),
+          required: [],
+          additionalProperties: false,
+        },
+      };
+    });
+    const request = new Request("http://localhost/api/validate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ schema: { tools } }),
+    });
+
+    const response = await POST(request);
+    const responseText = await response.text();
+    const body = JSON.parse(responseText) as {
+      fixedSchema: unknown;
+      fixedSchemaOmitted: boolean;
+      patches: unknown[];
+      patchesOmitted: boolean;
+      errors: unknown[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(new TextEncoder().encode(responseText).byteLength).toBeLessThanOrEqual(
+      512_000,
+    );
+    expect(body.fixedSchema).toBeNull();
+    expect(body.fixedSchemaOmitted).toBe(true);
+    expect(body.patches).toEqual([]);
+    expect(body.patchesOmitted).toBe(true);
+    expect(body.errors.length).toBeGreaterThan(0);
+  });
+
   it("rejects requests without a schema", async () => {
     const request = new Request("http://localhost/api/validate", {
       method: "POST",
@@ -115,6 +166,7 @@ describe("POST /api/validate", () => {
     const response = await POST(request);
 
     expect(response.status).toBe(400);
+    expect(response.headers.get("cache-control")).toBe("no-store");
     await expect(response.json()).resolves.toEqual({
       error: {
         code: "invalid_request",

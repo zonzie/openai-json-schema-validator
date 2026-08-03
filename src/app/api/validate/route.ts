@@ -1,7 +1,11 @@
 import { validateOpenAISchema } from "../../../lib/openai-schema-validator/validator";
+import {
+  MAX_INPUT_BYTES,
+  MAX_RESPONSE_BODY_BYTES as SHARED_MAX_RESPONSE_BODY_BYTES,
+} from "../../../lib/validation-limits";
 
-export const MAX_REQUEST_BODY_BYTES = 1_000_000;
-export const MAX_RESPONSE_BODY_BYTES = 512_000;
+export const MAX_REQUEST_BODY_BYTES = MAX_INPUT_BYTES;
+export const MAX_RESPONSE_BODY_BYTES = SHARED_MAX_RESPONSE_BODY_BYTES;
 
 const INVALID_REQUEST = {
   error: {
@@ -25,17 +29,20 @@ const VALIDATION_RESULT_TOO_LARGE = {
 } as const;
 
 function invalidRequest(): Response {
-  return Response.json(INVALID_REQUEST, { status: 400 });
+  return jsonResponse(JSON.stringify(INVALID_REQUEST), 400);
 }
 
 function payloadTooLarge(): Response {
-  return Response.json(PAYLOAD_TOO_LARGE, { status: 413 });
+  return jsonResponse(JSON.stringify(PAYLOAD_TOO_LARGE), 413);
 }
 
 function jsonResponse(serializedBody: string, status = 200): Response {
   return new Response(serializedBody, {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
   });
 }
 
@@ -61,7 +68,25 @@ function boundedValidationResponse(result: unknown): Response {
     }
   }
 
-  return Response.json(VALIDATION_RESULT_TOO_LARGE, { status: 422 });
+  if (
+    isObject(result) &&
+    Array.isArray(result.patches) &&
+    result.patches.length > 0
+  ) {
+    const withoutPatchDetails = JSON.stringify({
+      ...result,
+      fixedSchema: null,
+      ...(result.fixedSchema !== null ? { fixedSchemaOmitted: true } : {}),
+      patches: [],
+      patchesOmitted: true,
+    });
+
+    if (responseByteLength(withoutPatchDetails) <= MAX_RESPONSE_BODY_BYTES) {
+      return jsonResponse(withoutPatchDetails);
+    }
+  }
+
+  return jsonResponse(JSON.stringify(VALIDATION_RESULT_TOO_LARGE), 422);
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

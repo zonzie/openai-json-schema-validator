@@ -5,7 +5,7 @@ export default function manifest(): MetadataRoute.Manifest {
     name: "OpenAI JSON Schema Validator",
     short_name: "Schema Signal",
     description:
-      "Validate and safely repair JSON Schemas for OpenAI Structured Outputs.",
+      "Validate JSON Schemas for OpenAI Structured Outputs and review strict-mode patches.",
     start_url: "/",
     display: "standalone",
     background_color: "#eee8dc",

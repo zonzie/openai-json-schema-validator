@@ -14,13 +14,14 @@ describe("validateOpenAISchema", () => {
     });
 
     expect(result).toMatchObject({
-      ruleVersion: "2026-07-30",
+      ruleVersion: "2026-08-03",
       sourcePath: "$",
       valid: true,
       errors: [],
       warnings: [],
       fixedSchema: null,
       stats: {
+        schemaCount: 1,
         propertyCount: 1,
         maxObjectDepth: 1,
         totalStringLength: 4,
@@ -116,7 +117,7 @@ describe("validateOpenAISchema", () => {
     );
   });
 
-  it("finds and safely fixes missing strict object requirements", () => {
+  it("finds and patches missing strict object requirements", () => {
     const input = {
       type: "object",
       properties: {
@@ -165,6 +166,20 @@ describe("validateOpenAISchema", () => {
       required: ["profile"],
       additionalProperties: false,
     });
+    expect(result.patches).toEqual(
+      expect.arrayContaining([
+        {
+          operation: "add",
+          path: "$.properties.profile.additionalProperties",
+          value: false,
+        },
+        {
+          operation: "replace",
+          path: "$.properties.profile.required",
+          value: ["name", "age"],
+        },
+      ]),
+    );
 
     expect(validateOpenAISchema(result.fixedSchema).valid).toBe(true);
   });
@@ -203,7 +218,7 @@ describe("validateOpenAISchema", () => {
     expect(validateOpenAISchema(result.fixedSchema).valid).toBe(true);
   });
 
-  it("removes required names that have no declared property", () => {
+  it("does not remove required names that have no declared property", () => {
     const result = validateOpenAISchema({
       type: "object",
       required: ["ghost"],
@@ -216,12 +231,8 @@ describe("validateOpenAISchema", () => {
         path: "$.required",
       }),
     );
-    expect(result.fixedSchema).toEqual({
-      type: "object",
-      required: [],
-      additionalProperties: false,
-    });
-    expect(validateOpenAISchema(result.fixedSchema).valid).toBe(true);
+    expect(result.fixedSchema).toBeNull();
+    expect(result.patches).toEqual([]);
   });
 
   it("does not guess how to fix a likely property-name typo", () => {
@@ -442,7 +453,7 @@ describe("validateOpenAISchema", () => {
     );
   });
 
-  it("safely repairs referenced object schemas without mutating input", () => {
+  it("patches referenced object schemas without mutating input", () => {
     const input = {
       type: "object",
       properties: {
@@ -779,6 +790,169 @@ describe("validateOpenAISchema", () => {
     }
   });
 
+  it("validates every recognized function schema in a tools request", () => {
+    const result = validateOpenAISchema({
+      model: "gpt-5.6",
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "first",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string" } },
+              required: ["query"],
+              additionalProperties: false,
+            },
+          },
+        },
+        {
+          type: "function",
+          name: "second",
+          parameters: {
+            type: "object",
+            properties: { limit: { type: "integer" } },
+            required: [],
+          },
+        },
+      ],
+    });
+
+    expect(result.sourcePath).toBe("$.tools");
+    expect(result.valid).toBe(false);
+    expect(result.stats.propertyCount).toBe(2);
+    expect(result.stats.schemaCount).toBe(2);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "additional_properties_must_be_false",
+          path: "$.tools[1].parameters.additionalProperties",
+        }),
+        expect.objectContaining({
+          code: "property_must_be_required",
+          path: "$.tools[1].parameters.required",
+        }),
+      ]),
+    );
+    expect(result.fixedSchema).toEqual({
+      model: "gpt-5.6",
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "first",
+            parameters: {
+              type: "object",
+              properties: { query: { type: "string" } },
+              required: ["query"],
+              additionalProperties: false,
+            },
+          },
+        },
+        {
+          type: "function",
+          name: "second",
+          parameters: {
+            type: "object",
+            properties: { limit: { type: "integer" } },
+            required: ["limit"],
+            additionalProperties: false,
+          },
+        },
+      ],
+    });
+    expect(result.patches).toEqual([
+      {
+        operation: "add",
+        path: "$.tools[1].parameters.additionalProperties",
+        value: false,
+      },
+      {
+        operation: "replace",
+        path: "$.tools[1].parameters.required",
+        value: ["limit"],
+      },
+    ]);
+  });
+
+  it.each([
+    ["minimum", "0", "numeric_keyword_must_be_number"],
+    ["maximum", null, "numeric_keyword_must_be_number"],
+    ["multipleOf", 0, "multiple_of_must_be_positive"],
+    ["minLength", -1, "size_keyword_must_be_non_negative_integer"],
+    ["maxLength", 1.5, "size_keyword_must_be_non_negative_integer"],
+    ["minItems", -1, "size_keyword_must_be_non_negative_integer"],
+    ["maxItems", 2.5, "size_keyword_must_be_non_negative_integer"],
+    ["pattern", 42, "pattern_must_be_string"],
+  ] as const)(
+    "rejects a malformed %s keyword value",
+    (keyword, value, code) => {
+      const result = validateOpenAISchema({
+        type: "object",
+        properties: {
+          value: { type: "string", [keyword]: value },
+        },
+        required: ["value"],
+        additionalProperties: false,
+      });
+
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContainEqual(
+        expect.objectContaining({
+          code,
+          path: `$.properties.value.${keyword}`,
+        }),
+      );
+    },
+  );
+
+  it("rejects duplicate values in type and required arrays", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        value: { type: ["string", "string"] },
+      },
+      required: ["value", "value"],
+      additionalProperties: false,
+    });
+
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "type_values_must_be_unique",
+          path: "$.properties.value.type",
+        }),
+        expect.objectContaining({
+          code: "required_values_must_be_unique",
+          path: "$.required",
+        }),
+      ]),
+    );
+  });
+
+  it("warns about constraints whose compatibility cannot be confirmed locally", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        empty: { type: "string", enum: [] },
+        repeated: { type: "string", enum: ["x", "x"] },
+        pattern: { type: "string", pattern: "[" },
+        remote: { $ref: "https://example.com/schema.json" },
+      },
+      required: ["empty", "repeated", "pattern", "remote"],
+      additionalProperties: false,
+    });
+
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "empty_enum" }),
+        expect.objectContaining({ code: "duplicate_enum_value" }),
+        expect.objectContaining({ code: "invalid_pattern_syntax" }),
+        expect.objectContaining({ code: "external_ref_not_resolved" }),
+      ]),
+    );
+  });
+
   it("does not mistake a bare schema tools annotation for a request wrapper", () => {
     const result = validateOpenAISchema({
       type: "object",
@@ -873,7 +1047,7 @@ describe("validateOpenAISchema", () => {
     );
   });
 
-  it("preserves a Responses text-format wrapper when applying safe fixes", () => {
+  it("preserves a Responses text-format wrapper when applying a patch", () => {
     const input = {
       model: "gpt-5.6",
       input: "Return a short answer.",
@@ -1066,6 +1240,25 @@ describe("validateOpenAISchema", () => {
       expect.objectContaining({
         code: "unsupported_type",
         path: "$.properties.publishedAt.type",
+      }),
+    );
+  });
+
+  it("returns a type diagnostic for non-JSON values without throwing", () => {
+    const result = validateOpenAISchema({
+      type: "object",
+      properties: {
+        value: { type: ["string", Symbol("invalid")] },
+      },
+      required: ["value"],
+      additionalProperties: false,
+    });
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        code: "unsupported_type",
+        path: "$.properties.value.type",
       }),
     );
   });

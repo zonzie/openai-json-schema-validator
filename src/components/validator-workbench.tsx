@@ -8,6 +8,12 @@ import {
   type ValidationResult,
   validateOpenAISchema,
 } from "../lib/openai-schema-validator/validator";
+import {
+  trackPatchedJsonCopied,
+  trackPatchApplied,
+  trackValidation,
+} from "../lib/public-analytics";
+import { MAX_INPUT_BYTES } from "../lib/validation-limits";
 import styles from "./validator-workbench.module.css";
 
 const BROKEN_SAMPLE = JSON.stringify(
@@ -81,6 +87,8 @@ const SAMPLES = [
   { label: "Responses wrapper", value: WRAPPER_SAMPLE },
 ] as const;
 
+const MAX_RENDERED_LINE_NUMBERS = 2_000;
+
 function DiagnosticCard({
   diagnostic,
 }: {
@@ -108,6 +116,17 @@ function DiagnosticCard({
           {diagnostic.suggestion}
         </p>
       ) : null}
+      <p className={styles.diagnosticEvidence}>
+        <span>Rule evidence</span>
+        <a
+          href={diagnostic.documentationUrl}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Official rule
+        </a>
+        <small>Rule set {RULE_VERSION}</small>
+      </p>
     </article>
   );
 }
@@ -118,26 +137,49 @@ export function ValidatorWorkbench() {
     validateOpenAISchema(BROKEN_SAMPLE),
   );
   const [isDirty, setIsDirty] = useState(false);
+  const [inputIssue, setInputIssue] = useState<string | null>(null);
   const [editorScrollTop, setEditorScrollTop] = useState(0);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
     "idle",
   );
 
   const lineNumbers = useMemo(
-    () => schemaText.split("\n").map((_, index) => index + 1),
+    () =>
+      schemaText
+        .split("\n", MAX_RENDERED_LINE_NUMBERS)
+        .map((_, index) => index + 1),
     [schemaText],
   );
 
   const fixedText =
-    isDirty || result.fixedSchema === null
+    isDirty || inputIssue !== null || result.fixedSchema === null
       ? null
       : JSON.stringify(result.fixedSchema, null, 2);
   const diagnostics = [...result.errors, ...result.warnings];
 
   function runValidation(nextText = schemaText) {
-    setResult(validateOpenAISchema(nextText));
+    if (new TextEncoder().encode(nextText).byteLength > MAX_INPUT_BYTES) {
+      setInputIssue(
+        "The browser input exceeds the 1,000,000-byte validation limit.",
+      );
+      setIsDirty(false);
+      setCopyState("idle");
+      trackValidation("input_too_large");
+      return;
+    }
+
+    const nextResult = validateOpenAISchema(nextText);
+    setResult(nextResult);
+    setInputIssue(null);
     setIsDirty(false);
     setCopyState("idle");
+    trackValidation(
+      nextResult.valid
+        ? nextResult.warnings.length > 0
+          ? "pass_with_warnings"
+          : "pass"
+        : "error",
+    );
   }
 
   function loadSample(value: string) {
@@ -145,21 +187,24 @@ export function ValidatorWorkbench() {
     runValidation(value);
   }
 
-  function applyFixes() {
+  function applyPatch() {
     if (fixedText === null) {
       return;
     }
 
     setSchemaText(fixedText);
     setResult(validateOpenAISchema(fixedText));
+    setInputIssue(null);
     setIsDirty(false);
     setCopyState("idle");
+    trackPatchApplied();
   }
 
   async function copyText(value: string) {
     try {
       await navigator.clipboard.writeText(value);
       setCopyState("copied");
+      trackPatchedJsonCopied();
     } catch {
       setCopyState("failed");
     }
@@ -167,13 +212,15 @@ export function ValidatorWorkbench() {
 
   const statusLabel = isDirty
     ? "Edited · run check"
-    : result.valid
-      ? result.warnings.length > 0
-        ? "Valid with warnings"
-        : "Documented rules pass"
-      : `${result.errors.length} ${
-          result.errors.length === 1 ? "error" : "errors"
-        }${result.omittedDiagnosticCount > 0 ? " · more omitted" : ""}`;
+    : inputIssue
+      ? "Input too large"
+      : result.valid
+        ? result.warnings.length > 0
+          ? "Valid with warnings"
+          : "Documented rules pass"
+        : `${result.errors.length} ${
+            result.errors.length === 1 ? "error" : "errors"
+          }${result.omittedDiagnosticCount > 0 ? " · more omitted" : ""}`;
 
   return (
     <section className={styles.workbench} aria-labelledby="workbench-title">
@@ -193,9 +240,11 @@ export function ValidatorWorkbench() {
             className={`${styles.statusSignal} ${
               isDirty
                 ? styles.statusIdle
-                : result.valid
-                  ? styles.statusValid
-                  : styles.statusInvalid
+                : inputIssue
+                  ? styles.statusInvalid
+                  : result.valid
+                    ? styles.statusValid
+                    : styles.statusInvalid
             }`}
             aria-live="polite"
           >
@@ -224,6 +273,7 @@ export function ValidatorWorkbench() {
               onClick={() => {
                 setSchemaText("");
                 setIsDirty(true);
+                setInputIssue(null);
                 setCopyState("idle");
               }}
             >
@@ -252,6 +302,7 @@ export function ValidatorWorkbench() {
               onChange={(event) => {
                 setSchemaText(event.target.value);
                 setIsDirty(true);
+                setInputIssue(null);
                 setCopyState("idle");
               }}
             />
@@ -274,83 +325,125 @@ export function ValidatorWorkbench() {
         </div>
 
         <div className={styles.resultsPanel}>
-          <div className={styles.statsStrip}>
-            <div>
-              <span>Properties</span>
-              <strong>
-                {result.stats.propertyCount.toLocaleString("en-US")}
-                <small>/5,000</small>
-              </strong>
+          {isDirty ? (
+            <div className={styles.staleResults} aria-live="polite">
+              <span aria-hidden="true">↻</span>
+              <div>
+                <h3>Results are out of date</h3>
+                <p>
+                  Run validation again to replace the previous diagnostics and
+                  statistics with results for this edit.
+                </p>
+              </div>
             </div>
-            <div>
-              <span>Object depth</span>
-              <strong>
-                {result.stats.maxObjectDepth}
-                <small>/10</small>
-              </strong>
+          ) : inputIssue ? (
+            <div className={styles.staleResults} aria-live="polite">
+              <span aria-hidden="true">!</span>
+              <div>
+                <h3>Input is too large</h3>
+                <p>{inputIssue}</p>
+              </div>
             </div>
-            <div>
-              <span>Enum values</span>
-              <strong>
-                {result.stats.enumValueCount.toLocaleString("en-US")}
-                <small>/1,000</small>
-              </strong>
-            </div>
-          </div>
-
-          <div className={styles.resultsHeading}>
-            <div>
-              <p className={styles.eyebrow}>Diagnostics</p>
-              <h3>
-                {diagnostics.length === 0
-                  ? "No documented rule violations"
-                  : result.omittedDiagnosticCount > 0
-                    ? `${diagnostics.length} shown · ${result.omittedDiagnosticCount} omitted`
-                    : `${diagnostics.length} ${
-                        diagnostics.length === 1 ? "finding" : "findings"
-                      }`}
-              </h3>
-            </div>
-            <code>{result.sourcePath}</code>
-          </div>
-
-          <div className={styles.diagnosticsList}>
-            {diagnostics.length === 0 ? (
-              <div className={styles.validMessage}>
-                <span aria-hidden="true">✓</span>
+          ) : (
+            <>
+              <div className={styles.statsStrip}>
                 <div>
-                  <strong>The schema passes this documented preflight.</strong>
-                  <p>
-                    It is still worth testing the real request with the exact
-                    model and API surface you plan to use.
-                  </p>
+                  <span>Schemas</span>
+                  <strong>{result.stats.schemaCount}</strong>
+                </div>
+                <div>
+                  <span>Properties scanned</span>
+                  <strong>
+                    {result.stats.propertyCount.toLocaleString("en-US")}
+                    <small>
+                      {result.stats.schemaCount > 1 ? "combined" : "/5,000"}
+                    </small>
+                  </strong>
+                </div>
+                <div>
+                  <span>Object depth</span>
+                  <strong>
+                    {result.stats.maxObjectDepth}
+                    <small>/10</small>
+                  </strong>
+                </div>
+                <div>
+                  <span>Enum values</span>
+                  <strong>
+                    {result.stats.enumValueCount.toLocaleString("en-US")}
+                    <small>
+                      {result.stats.schemaCount > 1 ? "combined" : "/1,000"}
+                    </small>
+                  </strong>
                 </div>
               </div>
-            ) : (
-              diagnostics.map((diagnostic, index) => (
-                <DiagnosticCard
-                  key={`${diagnostic.code}-${diagnostic.path}-${index}`}
-                  diagnostic={diagnostic}
-                />
-              ))
-            )}
-          </div>
+
+              <div className={styles.resultsHeading}>
+                <div>
+                  <p className={styles.eyebrow}>Diagnostics</p>
+                  <h3>
+                    {diagnostics.length === 0
+                      ? "No documented rule violations"
+                      : result.omittedDiagnosticCount > 0
+                        ? `${diagnostics.length} shown · ${result.omittedDiagnosticCount} omitted`
+                        : `${diagnostics.length} ${
+                            diagnostics.length === 1 ? "finding" : "findings"
+                          }`}
+                  </h3>
+                </div>
+                <code>{result.sourcePath}</code>
+              </div>
+
+              <div className={styles.diagnosticsList}>
+                {diagnostics.length === 0 ? (
+                  <div className={styles.validMessage}>
+                    <span aria-hidden="true">✓</span>
+                    <div>
+                      <strong>
+                        The schema passes this documented preflight.
+                      </strong>
+                      <p>
+                        It is still worth testing the real request with the
+                        exact model and API surface you plan to use.
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  diagnostics.map((diagnostic, index) => (
+                    <DiagnosticCard
+                      key={`${diagnostic.code}-${diagnostic.path}-${index}`}
+                      diagnostic={diagnostic}
+                    />
+                  ))
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
       {fixedText !== null ? (
         <div className={styles.fixTray}>
           <div className={styles.fixCopy}>
-            <p className={styles.eyebrow}>Conservative repair available</p>
-            <h3>Fix strict object requirements without rewriting your model.</h3>
+            <p className={styles.eyebrow}>Review before applying</p>
+            <h3>Strict-mode patch available</h3>
             <p>
-              Adds missing required keys, removes undeclared required names,
-              and locks object schemas with{" "}
-              <code>additionalProperties: false</code>.
+              This patch only adds missing required keys and sets object schemas
+              to <code>additionalProperties: false</code>. It never removes an
+              undeclared required name.
             </p>
+            <ul className={styles.patchList} aria-label="Proposed patch">
+              {result.patches.map((patch) => (
+                <li key={`${patch.operation}-${patch.path}`}>
+                  <span>{patch.operation}</span>
+                  <code>{patch.path}</code>
+                  <small>{JSON.stringify(patch.value)}</small>
+                </li>
+              ))}
+            </ul>
             <div className={styles.fixActions}>
-              <button type="button" onClick={applyFixes}>
-                Apply safe fixes
+              <button type="button" onClick={applyPatch}>
+                Apply reviewed patch
               </button>
               <button
                 className={styles.secondaryButton}
@@ -361,13 +454,13 @@ export function ValidatorWorkbench() {
                   ? "Copied"
                   : copyState === "failed"
                     ? "Copy failed"
-                    : "Copy fixed JSON"}
+                    : "Copy patched JSON"}
               </button>
             </div>
           </div>
           <div className={styles.fixPreview}>
             <div>
-              <span>Fixed JSON preview</span>
+              <span>Patched JSON preview</span>
               <span>{fixedText.split("\n").length} lines</span>
             </div>
             <pre>{fixedText}</pre>

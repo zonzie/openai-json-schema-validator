@@ -1,5 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { IBM_Plex_Mono, IBM_Plex_Sans, Newsreader } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
+
+import { SITE_URL } from "@/lib/site";
 
 import "./globals.css";
 
@@ -23,15 +26,14 @@ const monoFont = IBM_Plex_Mono({
   display: "swap",
 });
 
-const siteUrl =
-  process.env.NEXT_PUBLIC_SITE_URL ??
-  "https://openai-json-schema-validator.vercel.app";
+const googleSiteVerification =
+  process.env.NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION;
 
 export const metadata: Metadata = {
-  metadataBase: new URL(siteUrl),
+  metadataBase: new URL(SITE_URL),
   title: "OpenAI JSON Schema Validator for Structured Outputs",
   description:
-    "Validate and safely fix JSON Schemas for OpenAI Structured Outputs. Catch required, additionalProperties, nesting, enum, and unsupported-keyword errors.",
+    "Validate JSON Schemas for OpenAI Structured Outputs. Find exact required, additionalProperties, nesting, enum, and unsupported-keyword errors.",
   applicationName: "Schema Signal",
   keywords: [
     "openai json schema validator",
@@ -49,10 +51,10 @@ export const metadata: Metadata = {
     siteName: "Schema Signal",
     title: "OpenAI JSON Schema Validator for Structured Outputs",
     description:
-      "Path-specific diagnostics and conservative fixes for the documented OpenAI Structured Outputs schema subset.",
+      "Path-specific diagnostics and reviewable strict-mode patches for the documented OpenAI Structured Outputs schema subset.",
   },
   twitter: {
-    card: "summary_large_image",
+    card: "summary",
     title: "OpenAI JSON Schema Validator",
     description:
       "Validate Structured Outputs schemas before the OpenAI API does.",
@@ -61,6 +63,9 @@ export const metadata: Metadata = {
     index: true,
     follow: true,
   },
+  verification: googleSiteVerification
+    ? { google: googleSiteVerification }
+    : undefined,
 };
 
 export const viewport: Viewport = {
@@ -78,7 +83,10 @@ export default function RootLayout({
       lang="en"
       className={`${displayFont.variable} ${bodyFont.variable} ${monoFont.variable}`}
     >
-      <body>{children}</body>
+      <body>
+        {children}
+        {process.env.VERCEL ? <Analytics /> : null}
+      </body>
     </html>
   );
 }

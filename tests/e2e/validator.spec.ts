@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("user can diagnose and repair a strict-mode schema", async ({ page }) => {
+test("user can diagnose and apply a reviewed strict-mode patch", async ({ page }) => {
   await page.goto("/");
 
   await expect(page).toHaveTitle(
@@ -11,7 +11,7 @@ test("user can diagnose and repair a strict-mode schema", async ({ page }) => {
   ).toBeVisible();
   await expect(page.getByText("5 errors", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Apply safe fixes" }).click();
+  await page.getByRole("button", { name: "Apply reviewed patch" }).click();
 
   await expect(
     page.getByText("Valid with warnings", { exact: true }),
@@ -30,7 +30,7 @@ test("editing the schema invalidates an older suggested fix", async ({
   await page.goto("/");
 
   const editor = page.getByRole("textbox", { name: "JSON Schema input" });
-  const applyFixes = page.getByRole("button", { name: "Apply safe fixes" });
+  const applyFixes = page.getByRole("button", { name: "Apply reviewed patch" });
   const replacement = JSON.stringify(
     {
       type: "object",
@@ -47,6 +47,8 @@ test("editing the schema invalidates an older suggested fix", async ({
   await expect(applyFixes).toBeVisible();
   await editor.fill(replacement);
   await expect(applyFixes).toBeHidden();
+  await expect(page.getByText("Results are out of date")).toBeVisible();
+  await expect(page.getByText("5 errors", { exact: true })).toBeHidden();
 
   await page.getByRole("button", { name: "Validate schema" }).click();
 
@@ -56,7 +58,7 @@ test("editing the schema invalidates an older suggested fix", async ({
   await expect(editor).toHaveValue(replacement);
 });
 
-test("safe fixes preserve the complete OpenAI request wrapper", async ({
+test("reviewed patches preserve the complete OpenAI request wrapper", async ({
   page,
 }) => {
   const wrapper = {
@@ -86,7 +88,7 @@ test("safe fixes preserve the complete OpenAI request wrapper", async ({
   await page.getByRole("button", { name: "Validate schema" }).click();
 
   await expect(page.getByText("1 error", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Apply safe fixes" }).click();
+  await page.getByRole("button", { name: "Apply reviewed patch" }).click();
 
   await expect(
     page.getByText("Documented rules pass", { exact: true }),
@@ -103,4 +105,83 @@ test("safe fixes preserve the complete OpenAI request wrapper", async ({
       },
     },
   });
+});
+
+test("shows reviewable patch operations and rule evidence", async ({ page }) => {
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("heading", { name: "Strict-mode patch available" }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByLabel("Proposed patch")
+      .getByText("$.properties.citation.additionalProperties", {
+        exact: true,
+      }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Official rule" }).first(),
+  ).toHaveAttribute("href", /developers\.openai\.com/);
+});
+
+test("blocks oversized browser input before validation", async ({
+  page,
+}, testInfo) => {
+  test.setTimeout(60_000);
+  test.skip(testInfo.project.name !== "chromium");
+  await page.goto("/");
+
+  const editor = page.getByRole("textbox", { name: "JSON Schema input" });
+  await editor.fill("x".repeat(1_000_001));
+  await expect(page.getByText("Edited · run check")).toBeVisible();
+  await page.getByRole("button", { name: "Validate schema" }).click();
+
+  await expect(page.getByText("Input is too large")).toBeVisible();
+  await expect(page.getByText("Documented rules pass")).toBeHidden();
+});
+
+test("keeps the validator close to the first mobile viewport", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile-chromium");
+  await page.goto("/");
+
+  const workbench = page.getByRole("heading", { name: "Schema workbench" });
+  const box = await workbench.boundingBox();
+  expect(box?.y).toBeLessThan(900);
+});
+
+test("publishes crawlable canonical, structured data, robots, and sitemap", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium");
+  await page.goto("/");
+
+  await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
+    "href",
+    "https://openai-json-schema-validator.vercel.app",
+  );
+  const structuredData = await page
+    .locator('script[type="application/ld+json"]')
+    .evaluateAll((scripts) =>
+      scripts.flatMap((script) => JSON.parse(script.textContent ?? "[]")),
+    );
+  expect(structuredData.map((entry) => entry["@type"])).toEqual([
+    "SoftwareApplication",
+    "FAQPage",
+  ]);
+
+  const robots = await request.get("/robots.txt");
+  expect(robots.ok()).toBe(true);
+  await expect(robots.text()).resolves.toContain(
+    "Sitemap: https://openai-json-schema-validator.vercel.app/sitemap.xml",
+  );
+
+  const sitemap = await request.get("/sitemap.xml");
+  expect(sitemap.ok()).toBe(true);
+  await expect(sitemap.text()).resolves.toContain(
+    "<loc>https://openai-json-schema-validator.vercel.app</loc>",
+  );
 });
